@@ -1,0 +1,58 @@
+{
+  "name": "daily-intake-desktop",
+  "version": "2.18.1",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "description": "本地饮食、营养、运动与体重记录应用",
+  "author": "Local application",
+  "build": {
+    "appId": "com.local.dailyintake",
+    "productName": "每日摄入",
+    "electronVersion": "43.2.0",
+    "electronDist": "../../node_modules/electron/dist",
+    "asar": true,
+    "npmRebuild": false,
+    "files": [
+      "**/*",
+      "!*.map",
+      "!dist/**"
+    ],
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "dist",
+        "filter": [
+          "**/*",
+          "!**/*.map"
+        ]
+      }
+    ],
+    "directories": {
+      "output": "../electron-output-v2.18.1"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "nan-kcal.ico",
+      "artifactName": "DailyIntake-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "每日摄入",
+      "uninstallDisplayName": "每日摄入",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    }
+  }
+}

@@ -1,0 +1,17 @@
+Daily Intake 1.0.0 - clean application package
+
+Included:
+- Compiled application interface
+- Local API service source
+- Minimal Node.js runtime
+- Minimal Python standard-library runtime
+- Application icon and launch/uninstall scripts
+
+Intentionally excluded:
+- data/food_manage.sqlite
+- data/api_token.txt
+- API keys and LLM settings
+- Food, exercise, profile and weight records
+- Chat and analysis history
+- Logs, exports and backup files
+- Browser profiles, cookies and local storage
