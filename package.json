@@ -10,7 +10,7 @@
     "build": "vinext build",
     "desktop:prepare": "node scripts/prepare-electron-package.mjs",
     "start": "vinext start",
-    "test": "pnpm run build && node --test tests/body-trend-dates.test.mjs tests/energy-target-status.test.mjs tests/energy-balance-targets.test.mjs tests/macro-targets.test.mjs tests/target-scenarios.test.mjs tests/rendered-html.test.mjs tests/sync-engine.test.mjs tests/llm-record-tools.test.mjs tests/food-library.test.mjs tests/food-name.test.mjs tests/exercise-library.test.mjs tests/llm-batch-servings.test.mjs tests/contact-order.test.mjs tests/model-network.test.mjs tests/platform.test.mjs",
+    "test": "npm run build && node --test tests/body-trend-dates.test.mjs tests/energy-target-status.test.mjs tests/energy-balance-targets.test.mjs tests/macro-targets.test.mjs tests/target-scenarios.test.mjs tests/rendered-html.test.mjs tests/sync-engine.test.mjs tests/llm-record-tools.test.mjs tests/food-library.test.mjs tests/food-name.test.mjs tests/exercise-library.test.mjs tests/llm-batch-servings.test.mjs tests/contact-order.test.mjs tests/model-network.test.mjs tests/platform.test.mjs",
     "lint": "eslint app db electron examples scripts tests worker vite.config.ts next.config.ts drizzle.config.ts eslint.config.mjs --ignore-pattern '*.bundle.mjs'",
     "db:generate": "drizzle-kit generate"
   },

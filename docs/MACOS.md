@@ -4,15 +4,15 @@
 
 ## 在 Mac 上构建
 
-安装 Git、Node.js 22.13 或更新版本、pnpm 11 和 Xcode Command Line Tools。Apple 芯片使用 `arm64`；Intel Mac 使用 `x64`。打包器会按目标架构下载对应的 Electron，不复用开发电脑上的 Electron 二进制文件。
+安装 Git、Node.js 22.13 或更新版本和 Xcode Command Line Tools。Apple 芯片使用 `arm64`；Intel Mac 使用 `x64`。打包器会按目标架构下载对应的 Electron，不复用开发电脑上的 Electron 二进制文件。
 
 ```sh
 git clone https://github.com/PKsetupexe/daily-intake-tracker.git
 cd daily-intake-tracker
 npm ci
-pnpm test
-pnpm desktop:prepare
-pnpm exec electron-builder --projectDir installer/electron-app --mac dmg --arm64 --publish never
+npm test
+npm run desktop:prepare
+npx electron-builder --projectDir installer/electron-app --mac dmg --arm64 --publish never
 ```
 
 Intel Mac 将最后一行的 `--arm64` 改为 `--x64`。输出位于 `installer/electron-output-v3.6.0/`。`desktop:prepare` 会将 `electron/*.mjs` 和新编译的 `dist/` 复制到忽略的打包目录；修改桌面代码后需重新运行。`app-icon.png` 是 512×512 的 Mac 图标来源，由 electron-builder 转换。

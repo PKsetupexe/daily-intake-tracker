@@ -20,23 +20,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.19.0
       - name: Install dependencies
         run: npm ci
       - name: Build and test
-        run: pnpm test
+        run: npm test
       - name: Prepare desktop package
-        run: pnpm desktop:prepare
+        run: npm run desktop:prepare
       - name: Build macOS disk image
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: pnpm exec electron-builder --projectDir installer/electron-app --mac dmg --${{ matrix.arch }} --publish never
+        run: npx electron-builder --projectDir installer/electron-app --mac dmg --${{ matrix.arch }} --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: daily-intake-macos-${{ matrix.arch }}
           path: installer/electron-output-v3.6.0/*.dmg
           if-no-files-found: error
       - name: Smoke test macOS desktop lifecycle
-        run: pnpm exec electron scripts/smoke-macos.mjs
+        run: npx electron scripts/smoke-macos.mjs
