@@ -1,12 +1,13 @@
 import { app, BrowserWindow, Menu } from "electron";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 if (process.platform !== "darwin") throw new Error("此检查必须在 macOS 上运行");
 
 const root = path.resolve(import.meta.dirname, "..");
-app.setPath("userData", mkdtempSync(path.join(os.tmpdir(), "daily-intake-mac-")));
+const profile = mkdtempSync(path.join(os.tmpdir(), "daily-intake-mac-"));
+app.setPath("userData", profile);
 app.setAppPath(root);
 BrowserWindow.prototype.show = function () {};
 setTimeout(() => app.exit(1), 60_000).unref();
@@ -47,5 +48,8 @@ try {
   app.exit(0);
 } catch (error) {
   console.error(error);
+  console.error("Window URLs:", BrowserWindow.getAllWindows().map((window) => window.webContents.getURL()));
+  const logFile = path.join(profile, "data", "desktop.log");
+  if (existsSync(logFile)) console.error("Desktop log:\n" + readFileSync(logFile, "utf8"));
   app.exit(1);
 }
