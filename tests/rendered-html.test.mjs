@@ -71,7 +71,7 @@ test("renders the daily intake application", async () => {
   assert.match(globalCss, /\.chart-tooltip-box/);
   assert.match(globalCss, /:root\[data-theme="dark"\]/);
   assert.match(globalCss, /color-scheme:\s*dark/);
-  assert.match(pageSource, /跟随 Windows/);
+  assert.match(pageSource, /跟随系统/);
   assert.match(pageSource, /daily-intake-theme/);
   assert.match(pageSource, /<h1><span>\{displayDate\}<\/span><span>\{displayWeekday\}<\/span><\/h1>/);
   assert.match(pageSource, /<details className="target-plan-card">/);

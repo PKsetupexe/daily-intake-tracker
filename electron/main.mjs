@@ -14,7 +14,7 @@ import path from "node:path";
 import { createSyncEngine } from "./sync-engine.mjs";
 import { EDIT_OPERATIONS, mergeEditableRecord } from "./llm-record-tools.mjs";
 
-// Use the same Windows-compatible static server in development and packaged builds.
+// Use the same cross-platform static server in development and packaged builds.
 import { startProdServer } from "./frontend-server.bundle.mjs";
 
 const STORES = [
@@ -702,13 +702,15 @@ function startApi() {
 
 async function createDesktopWindow() {
   const appRoot = app.getAppPath();
-  const frontendOutDir = app.isPackaged
-    ? path.join(process.resourcesPath, "dist")
-    : path.join(appRoot, "dist");
-  const frontend = await startProdServer({ port: 0, host: "127.0.0.1", outDir: frontendOutDir });
-  frontendServer = frontend.server;
-  uiOrigin = `http://127.0.0.1:${frontend.port}`;
-  await startApi();
+  if (!frontendServer) {
+    const frontendOutDir = app.isPackaged
+      ? path.join(process.resourcesPath, "dist")
+      : path.join(appRoot, "dist");
+    const frontend = await startProdServer({ port: 0, host: "127.0.0.1", outDir: frontendOutDir });
+    frontendServer = frontend.server;
+    uiOrigin = `http://127.0.0.1:${frontend.port}`;
+  }
+  if (!apiServer) await startApi();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -716,7 +718,7 @@ async function createDesktopWindow() {
     minHeight: 650,
     show: false,
     backgroundColor: "#f7f5ee",
-    icon: path.join(appRoot, "app-icon.png"),
+    ...(process.platform === "darwin" ? {} : { icon: path.join(appRoot, "app-icon.png") }),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -728,6 +730,7 @@ async function createDesktopWindow() {
     if (!target.startsWith(uiOrigin)) event.preventDefault();
   });
   mainWindow.once("ready-to-show", () => mainWindow.show());
+  mainWindow.once("closed", () => { mainWindow = null; });
   await mainWindow.loadURL(`${uiOrigin}/?api=${encodeURIComponent(`http://127.0.0.1:${apiPort}`)}`);
 }
 
@@ -742,8 +745,10 @@ else {
   });
   app.whenReady().then(async () => {
     try {
-      app.setAppUserModelId("com.local.dailyintake");
-      Menu.setApplicationMenu(null);
+      if (process.platform === "win32") app.setAppUserModelId("com.local.dailyintake");
+      Menu.setApplicationMenu(process.platform === "darwin"
+        ? Menu.buildFromTemplate([{ role: "appMenu" }, { role: "editMenu" }, { role: "windowMenu" }])
+        : null);
       initializeDatabase();
       await createDesktopWindow();
       syncEngine.start();
@@ -753,9 +758,17 @@ else {
       app.quit();
     }
   });
+  app.on("activate", () => {
+    if (process.platform === "darwin" && database && !mainWindow) {
+      createDesktopWindow().catch((error) => {
+        log(`Reopen error: ${error.stack || error}`);
+        dialog.showErrorBox("每日摄入无法打开", `重新打开失败：${error.message}`);
+      });
+    }
+  });
 }
 
-app.on("window-all-closed", () => app.quit());
+app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("before-quit", () => {
   try { syncEngine?.runSync(); } catch {}
   try { syncEngine?.stop(); } catch {}

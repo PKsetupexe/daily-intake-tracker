@@ -10,7 +10,6 @@
     "appId": "com.local.dailyintake",
     "productName": "每日摄入",
     "electronVersion": "43.2.0",
-    "electronDist": "../../node_modules/electron/dist",
     "asar": true,
     "npmRebuild": false,
     "files": [
@@ -42,6 +41,11 @@
       ],
       "icon": "nan-kcal.ico",
       "artifactName": "DailyIntake-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "target": ["dmg"],
+      "icon": "app-icon.png",
+      "artifactName": "DailyIntake-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,

@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { detectedOneDriveRoot } from "./platform.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SNAPSHOT_POINTER_NAME = "latest.json";
@@ -146,15 +147,6 @@ export function createSyncEngine({
     const missing=starterCatalog.filter(({store,value})=>stores.includes(store)&&!known.has(`${store}:${value.id}`)&&!known.has(`${store}:${value.name}:${value.sex||''}`));
     if(!missing.length)return 0;
     return batchLocalChanges(()=>{seeding=true;try{for(const {store,value}of missing)localUpsert(store,value);}finally{seeding=false;}return missing.length;});
-  }
-
-  function detectedOneDriveRoot() {
-    const candidates = [
-      process.env.OneDriveCommercial,
-      process.env.OneDriveConsumer,
-      process.env.OneDrive,
-    ].filter(Boolean);
-    return candidates.find((candidate) => existsSync(candidate)) || candidates[0] || "";
   }
 
   function defaultFolder() {

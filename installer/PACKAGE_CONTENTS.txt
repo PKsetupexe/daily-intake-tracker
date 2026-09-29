@@ -1,4 +1,4 @@
-Daily Intake 3.6.0 — Electron package contents
+Daily Intake 3.6.0 — Electron package contents for Windows and macOS
 
 Included:
 - Compiled desktop interface and Electron entry point

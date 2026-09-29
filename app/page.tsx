@@ -1084,7 +1084,7 @@ export default function Home() {
 
 function AppearanceModal({ preference, onChange, onClose }: { preference: ThemePreference; onChange: (value: ThemePreference) => void; onClose: () => void }) {
   const choices: Array<{ value: ThemePreference; title: string; note: string; icon: string }> = [
-    { value: "system", title: "跟随 Windows", note: "系统切换浅色或深色时，应用自动同步", icon: "◐" },
+    { value: "system", title: "跟随系统", note: "系统切换浅色或深色时，应用自动同步", icon: "◐" },
     { value: "light", title: "固定浅色", note: "始终使用明亮背景，不受系统外观影响", icon: "☀" },
     { value: "dark", title: "固定深色", note: "始终使用深色背景，不受系统外观影响", icon: "☾" },
   ];
@@ -1460,7 +1460,7 @@ function LlmConfigModal({ onClose, onSave, config }: { onClose: () => void; onSa
         <label>API Key<input name="apiKey" type="password" placeholder={config.configured ? "已保存；留空表示不修改" : "sk-…"} required={!config.configured} /></label>
         <label>连接方式<select name="proxyMode" value={proxyMode} onChange={e=>setProxyMode(e.target.value)}><option value="auto">自动 · 系统代理不可用时直连</option><option value="direct">直连 · 不使用应用层代理</option><option value="system">仅使用系统代理设置</option><option value="custom">自定义代理</option></select></label>
         <label>代理地址<input name="proxyUrl" disabled={proxyMode!=="custom"} required={proxyMode==="custom"} defaultValue={config.proxyUrl||""} placeholder="http://127.0.0.1:7890"/></label>
-        <p className="wide">自动模式跟随 Windows 系统代理开关；失效的代理连接会回退直连。强制代理模式不回退。TUN / VPN 的系统路由仍由对应软件控制。</p>
+        <p className="wide">自动模式跟随系统代理设置；失效的代理连接会回退直连。强制代理模式不回退。TUN / VPN 的系统路由仍由对应软件控制。</p>
         <label className="wide">请求头预设<select name="headerPreset" defaultValue={config.headerPreset||"auto"}><option value="auto">自动识别 · OpenCode 自动补齐会话头</option><option value="standard">标准 OpenAI 兼容</option><option value="opencode">OpenCode · 稳定会话 ID</option></select></label>
         <label className="wide">自定义请求头（JSON，可留空）<textarea name="customHeaders" rows={4} defaultValue={config.customHeaders||"{}"} placeholder={'{"X-Custom-Header":"value"}'}/></label>
         <p className="wide">自定义值优先于预设，仅保存在本机。OpenCode 会话 ID 自动生成，同一对话保持稳定；清空对话后更换。客户端标识使用本软件名称。OpenCode Go 官方主要面向编程代理，是否接受营养助手用途由服务方决定。</p>
@@ -2070,7 +2070,7 @@ function History({ exerciseLibrary,walkingProfiles,foodLibrary, foods, exercises
     setSyncMessage("");
     try {
       await apiRequest<{ opened: boolean; folder: string }>("/api/sync/open-backup-folder", {});
-      setSyncMessage("已在 Windows 资源管理器中打开完整备份文件夹");
+      setSyncMessage("已在文件管理器中打开完整备份文件夹");
     } catch (error) {
       setSyncMessage(error instanceof Error ? error.message : "无法打开完整备份文件夹");
     }
@@ -2132,7 +2132,7 @@ function History({ exerciseLibrary,walkingProfiles,foodLibrary, foods, exercises
         <label className="sync-folder-field">
           <span>同步文件夹路径</span>
           <div>
-            <input value={syncFolderDraft} onChange={(event) => setSyncFolderDraft(event.target.value)} placeholder={"例如 D:\\网盘\\每日摄入同步"} />
+            <input value={syncFolderDraft} onChange={(event) => setSyncFolderDraft(event.target.value)} placeholder="选择或输入网盘中的每日摄入同步文件夹" />
             <button type="button" disabled={syncBusy} onClick={() => syncAction("/api/sync/select-folder", { enabled: Boolean(syncStatus?.enabled) })}>浏览选择</button>
             <button type="button" disabled={syncBusy || !syncFolderDraft.trim()} onClick={() => syncAction("/api/sync/config", { folder: syncFolderDraft, enabled: Boolean(syncStatus?.enabled) })}>保存路径</button>
           </div>
@@ -2155,7 +2155,7 @@ function History({ exerciseLibrary,walkingProfiles,foodLibrary, foods, exercises
       <div className="sync-actions">
         {syncStatus?.enabled && <ActionHelp hint="上传本机尚未发送的新事件到云端，同时读取其他设备产生的数据，并按时间戳合并"><button disabled={syncBusy} onClick={() => syncAction("/api/sync/run")}>立即同步</button></ActionHelp>}
         {syncStatus?.enabled && <ActionHelp hint="把本机当前未删除的全部记录写成一份独立备份文件，保存到当前同步目录"><button disabled={syncBusy} onClick={() => syncAction("/api/sync/backup")}>立即完整备份</button></ActionHelp>}
-        {syncStatus?.enabled && <ActionHelp hint="在 Windows 资源管理器中打开“立即完整备份”所在的 backups 文件夹"><button disabled={syncBusy} onClick={openCloudBackupFolder}>打开备份文件夹</button></ActionHelp>}
+        {syncStatus?.enabled && <ActionHelp hint="在文件管理器中打开“立即完整备份”所在的 backups 文件夹"><button disabled={syncBusy} onClick={openCloudBackupFolder}>打开备份文件夹</button></ActionHelp>}
         {syncStatus?.enabled && <ActionHelp hint="生成供程序迁移使用的完整同步快照到云端"><button className="primary" disabled={syncBusy} onClick={() => syncAction("/api/sync/full-export")}>导出全部记录到云盘</button></ActionHelp>}
         {syncStatus?.enabled && <ActionHelp hint="读取云盘最新完整快照及其后未覆盖的增量，并按时间戳合并到本机"><button disabled={syncBusy} onClick={() => syncAction("/api/sync/full-import")}>同步云端全部数据</button></ActionHelp>}
       </div>
