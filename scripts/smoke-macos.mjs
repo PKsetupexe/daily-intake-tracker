@@ -7,8 +7,11 @@ if (process.platform !== "darwin") throw new Error("此检查必须在 macOS 上
 
 const root = path.resolve(import.meta.dirname, "..");
 const profile = mkdtempSync(path.join(os.tmpdir(), "daily-intake-mac-"));
+console.log("Smoke runtime:", JSON.stringify({ executable: process.execPath, electron: process.versions.electron, ready: app.isReady(), asNode: process.env.ELECTRON_RUN_AS_NODE || "" }));
 app.setPath("userData", profile);
 app.setAppPath(root);
+app.on("ready", () => console.log("Electron ready event"));
+app.on("window-all-closed", () => console.log("All windows closed"));
 BrowserWindow.prototype.show = function () {};
 setTimeout(() => app.exit(1), 60_000).unref();
 let unexpectedQuit = false;
@@ -18,6 +21,7 @@ app.on("before-quit", (event) => {
 });
 
 await import("../electron/main.mjs");
+console.log("Main module imported; app ready:", app.isReady());
 
 async function readyWindow(previous = null) {
   for (let attempt = 0; attempt < 120; attempt++) {
@@ -49,6 +53,7 @@ try {
 } catch (error) {
   console.error(error);
   console.error("Window URLs:", BrowserWindow.getAllWindows().map((window) => window.webContents.getURL()));
+  console.error("App status:", JSON.stringify({ready:app.isReady(), appPath:app.getAppPath(), userData:app.getPath("userData"), unexpectedQuit}));
   const logFile = path.join(profile, "data", "desktop.log");
   if (existsSync(logFile)) console.error("Desktop log:\n" + readFileSync(logFile, "utf8"));
   app.exit(1);
