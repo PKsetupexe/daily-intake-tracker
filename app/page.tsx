@@ -1,6 +1,10 @@
 "use client";
 
 import { CSSProperties, FormEvent, ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { normalizeFoodRecord } from "./food-name.mjs";
+import { libraryId, scaleNutrients, sortLibraryFoods } from "./food-library.mjs";
+import { ActivityEditModal,ActivityPanel,ActivityModal,WalkingPanel,WalkingModal,ActivityEntry,WalkingProfile } from "./activity-library";
+import { ContactDirectory } from "./contact-directory";
 import { createPortal } from "react-dom";
 import { selectBodyTrendDates } from "./body-trend-dates.mjs";
 import { energyTargetForDate, longTermEnergyTargetForDate, normalizeEnergyAdjustment, projectedMonthlyWeightChange } from "./energy-balance-targets.mjs";
@@ -17,13 +21,15 @@ type Nutrients = {
   vitaminB12: number; folate: number;
 };
 
+type LibraryFood = Nutrients & { defaultServingGrams?:number; servingBasis?:string; reportedNutrients?:string[]; id: string; name: string; note: string; weight: number; createdAt: string; updatedAt: string };
+
 type FoodRecord = Nutrients & {
   id: string; date: string; time: string; meal: string; name: string; weight: number; note: string;
 };
 
 type ExerciseRecord = {
   id: string; date: string; time: string; name: string; calories: number; duration: number;
-  steps: number; intensity: string; source: string; note: string;
+  steps: number; intensity: string; source: string; note: string; sex?: string; kind?: string; libraryId?: string;
 };
 
 type TargetScenario = "daily" | "strength" | "cardio";
@@ -72,6 +78,8 @@ type EnergyTargetDefaultRecord = {
 };
 
 type SharedData = {
+  exerciseLibrary?: ActivityEntry[]; walkingProfiles?: WalkingProfile[];
+  foodLibrary?: LibraryFood[];
   foods: FoodRecord[]; exercises: ExerciseRecord[]; profile: Profile[]; weights: WeightRecord[];
   baselineMultipliers: BaselineMultiplierRecord[];
   targetScenarios: TargetScenarioDayRecord[];
@@ -87,6 +95,7 @@ type ChatMessage = {
 type AnalysisMessage = ChatMessage & { rangeDays: number };
 
 type LlmConfig = {
+  proxyMode?: string; proxyUrl?: string; headerPreset?: string; customHeaders?: string;
   baseUrl: string; model: string; systemPrompt: string; enableSearch: boolean;
   configured: boolean; externalEndpoint: string; externalToken: string;
 };
@@ -278,11 +287,15 @@ async function dbDelete(store: string, id: string) {
 }
 
 function dataCount(data: SharedData) {
-  return data.foods.length + data.exercises.length + data.profile.length + data.weights.length + data.baselineMultipliers.length
+  return (data.exerciseLibrary?.length || 0) + (data.walkingProfiles?.length || 0) + (data.foodLibrary?.length || 0) + data.foods.length + data.exercises.length + data.profile.length + data.weights.length + data.baselineMultipliers.length
     + data.targetScenarios.length + data.targetScenarioDefaults.length + data.energyTargetDays.length + data.energyTargetDefaults.length;
 }
 
 export default function Home() {
+  const [exerciseLibrary,setExerciseLibrary] = useState<ActivityEntry[]>([]);
+  const [walkingProfiles,setWalkingProfiles] = useState<WalkingProfile[]>([]);
+  const [editingActivity,setEditingActivity]=useState<ExerciseRecord|null>(null);
+  const [foodLibrary, setFoodLibrary] = useState<LibraryFood[]>([]);
   const [foods, setFoods] = useState<FoodRecord[]>([]);
   const [exercises, setExercises] = useState<ExerciseRecord[]>([]);
   const [profile, setProfile] = useState<Profile>({ id: "me", birthdate: "", sex: "unspecified", height: 0 });
@@ -294,7 +307,7 @@ export default function Home() {
   const [energyTargetDefaults, setEnergyTargetDefaults] = useState<EnergyTargetDefaultRecord[]>([]);
   const [date, setDate] = useState(today());
   const [tab, setTab] = useState<"today" | "body" | "history">("today");
-  const [modal, setModal] = useState<"food" | "exercise" | "weight" | "deleteWeight" | "baseline" | "deleteBaseline" | "profile" | "llm" | "appearance" | null>(null);
+  const [modal, setModal] = useState<"walking" | "libraryPick" | "food" | "exercise" | "weight" | "deleteWeight" | "baseline" | "deleteBaseline" | "profile" | "llm" | "appearance" | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
   const [quickText, setQuickText] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -393,7 +406,10 @@ export default function Home() {
           ]);
           setStatus("已连接本机共享数据库");
         }
-        setFoods(shared.foods); setExercises(shared.exercises);
+        setFoodLibrary(shared.foodLibrary || []);
+    setExerciseLibrary(shared.exerciseLibrary || []);
+    setWalkingProfiles(shared.walkingProfiles || []);
+    setFoods(shared.foods); setExercises(shared.exercises);
         if (shared.profile[0]) setProfile(shared.profile[0]);
         setWeights(shared.weights);
         setBaselineMultipliers(shared.baselineMultipliers);
@@ -482,26 +498,33 @@ export default function Home() {
   };
 
   async function saveFood(record: FoodRecord) {
+    record = normalizeFoodRecord(record);
     await dbPut("foods", record);
     setFoods((old) => [record, ...old.filter((x) => x.id !== record.id)]);
+    const shared = await apiRequest<SharedData>("/api/data");
+    setFoodLibrary(shared.foodLibrary || []);
+    setExerciseLibrary(shared.exerciseLibrary || []);
+    setWalkingProfiles(shared.walkingProfiles || []);
     setStatus(`已记录：${record.name}`);
   }
 
   async function saveExercise(record: ExerciseRecord) {
     await dbPut("exercises", record);
-    setExercises((old) => [record, ...old.filter((x) => x.id !== record.id)]);
+    await refreshSharedData();
     setStatus(`已记录：${record.name}`);
   }
 
   async function saveProfile(next: Profile) {
     await dbPut("profile", next);
     setProfile(next);
+    await refreshSharedData();
     setStatus("个人资料已保存，之后的消耗估算会使用这些数据");
   }
 
   async function saveWeight(record: WeightRecord) {
     await dbPut("weights", record);
     setWeights((old) => [record, ...old.filter((x) => x.id !== record.id)]);
+    await refreshSharedData();
     setStatus(`已记录体重：${record.weight} kg`);
   }
 
@@ -606,11 +629,11 @@ export default function Home() {
     setStatus(`${formatChartDate(recordDate)} 已恢复遵从当时的长期目标`);
   }
 
-  function submitFood(event: FormEvent<HTMLFormElement>) {
+  async function submitFood(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const nutrients = Object.fromEntries(nutrientLabels.map(([key]) => [key, n(form.get(key))])) as Nutrients;
-    saveFood({
+    await saveFood({
       id: editingFood?.id || uid(), date: String(form.get("date")), time: String(form.get("time")),
       meal: String(form.get("meal")), name: String(form.get("name")), weight: n(form.get("weight")),
       note: String(form.get("note") || ""), ...nutrients,
@@ -694,6 +717,9 @@ export default function Home() {
     shared.targetScenarioDefaults ||= [];
     shared.energyTargetDays ||= [];
     shared.energyTargetDefaults ||= [];
+    setFoodLibrary(shared.foodLibrary || []);
+    setExerciseLibrary(shared.exerciseLibrary || []);
+    setWalkingProfiles(shared.walkingProfiles || []);
     setFoods(shared.foods);
     setExercises(shared.exercises);
     if (shared.profile[0]) setProfile(shared.profile[0]);
@@ -726,12 +752,13 @@ export default function Home() {
     try {
       const result = await apiRequest<{ reply: string; actions: Array<{ store: string; value: object }> }>("/api/llm/chat", { message: text, selectedDate: date });
       setChatMessages((old) => [...old, { id: `assistant-${Date.now()}`, role: "assistant", content: result.reply }]);
-      await refreshSharedData();
+      try { await refreshSharedData(); } catch { setStatus("记录已保存，但页面刷新失败，请重新打开首页查看"); return; }
       setStatus(result.actions.length ? `LLM 已写入 ${result.actions.length} 条记录` : "LLM 已回复，未写入记录");
     } catch (error) {
       const message = error instanceof Error ? error.message : "LLM 请求失败";
       setChatMessages((old) => [...old, { id: `error-${Date.now()}`, role: "assistant", content: `无法处理：${message}` }]);
-      setStatus("LLM 请求失败，请检查模型配置");
+      setQuickText(text);
+      setStatus("本次请求未完成，输入已保留，请核对记录及具体原因后重试");
     } finally {
       setChatSending(false);
     }
@@ -744,7 +771,7 @@ export default function Home() {
     });
   }
 
-  async function saveLlmConfig(next: { baseUrl: string; apiKey: string; model: string; systemPrompt: string; enableSearch: boolean }) {
+  async function saveLlmConfig(next: { proxyMode?: string; proxyUrl?: string; headerPreset?: string; customHeaders?: string; baseUrl: string; apiKey: string; model: string; systemPrompt: string; enableSearch: boolean }) {
     await apiRequest("/api/llm/config", next);
     const updated = await apiRequest<LlmConfig>("/api/llm/config");
     setLlmConfig(updated);
@@ -821,6 +848,7 @@ export default function Home() {
     setWeights((old) => old.filter((item) => item.id !== record.id));
     setEditingWeight(null);
     setModal(null);
+    await refreshSharedData();
     setStatus(`已删除 ${formatChartDate(record.date)} 的体重记录`);
   }
 
@@ -875,7 +903,7 @@ export default function Home() {
                 <div className="chat-message assistant"><span>助手</span><p>{llmConfig.configured ? "告诉我吃了什么、运动了多少或今天的体重。我会核对信息后直接写入。" : "配置兼容接口和系统提示词后，这里会成为真正的 LLM 对话框。"}</p></div> :
                 chatMessages.slice(-8).map((message) => <div className={`chat-message ${message.role}`} key={message.id}><span>{message.role === "user" ? "你" : "助手"}</span><p>{message.content}</p></div>)
               }
-              {chatSending && <div className="chat-message assistant thinking"><span>助手</span><p>正在理解、查询并整理记录…</p></div>}
+              {chatSending && <div className="chat-message assistant thinking"><span>助手</span><p>正在逐项整理食物和运动，完成后统一保存…</p></div>}
             </div>
             <div className="recording-prompts" aria-label="快捷输入">
               {[
@@ -931,7 +959,7 @@ export default function Home() {
               <div className="card-title"><span>今日活动</span><em>{dayExercises.length} 条记录</em></div>
               <div className="movement-stats"><div><b>{steps.toLocaleString()}</b><small>步数</small></div><div><b>{Math.round(burned)}</b><small>消耗千卡</small></div></div>
               {bmr > 0 && <div className="bmr-hint">估算基础代谢 <strong>{bmr}</strong> 千卡/天</div>}
-              <button onClick={() => setModal("exercise")}>＋ 添加运动</button>
+              <div className="library-actions home-record-actions"><button onClick={() => setModal("walking")}>＋ 添加步行</button><button onClick={() => setModal("exercise")}>＋ 添加运动</button></div>
             </article>
           </section>
 
@@ -950,7 +978,7 @@ export default function Home() {
 
           <section className="content-grid">
             <div className="records">
-              <div className="section-title"><div><p>饮食记录</p><h2>今天吃了什么</h2></div><button onClick={() => { setEditingFood(null); setModal("food"); }}>＋ 添加饮食</button></div>
+              <div className="section-title"><div><p>饮食记录</p><h2>今天吃了什么</h2></div><div className="library-actions home-record-actions"><button onClick={() => { setEditingFood(null); setModal("food"); }}>＋ 手动添加</button><button onClick={() => { setModal("libraryPick"); refreshSharedData().catch(() => setStatus("食品库读取失败，请重新启动应用")); }}>选择已记录过的食物</button></div></div>
               {dayFoods.length === 0 ? <Empty text="还没有饮食记录" hint="用上方快速记账，或手动添加第一餐" /> :
                 dayFoods.sort((a, b) => b.time.localeCompare(a.time)).map((food) =>
                   <article
@@ -982,6 +1010,7 @@ export default function Home() {
                     <div className="food-symbol">动</div>
                     <div className="record-main"><span>{item.time} · {item.intensity} · {item.source}</span><strong>{item.name}</strong><small>{item.duration ? `${item.duration} 分钟` : ""}{exerciseSteps(item) ? ` · ${exerciseSteps(item).toLocaleString()} 步` : ""}{item.note ? ` · ${item.note}` : ""}</small></div>
                     <div className="record-numbers"><b>−{Math.round(item.calories)}</b><small>千卡</small></div>
+                    <button className="edit-record" onClick={()=>setEditingActivity(item)}>修改</button>
                     <button className="delete" aria-label={`删除${item.name}`} onClick={() => remove("exercises", item.id)}>×</button>
                   </article>)
               }
@@ -1020,6 +1049,8 @@ export default function Home() {
             onDeleteBaseline={(record) => { setEditingBaseline(record); setModal("deleteBaseline"); }}
           /> :
           <History
+            exerciseLibrary={exerciseLibrary} walkingProfiles={walkingProfiles}
+            foodLibrary={foodLibrary}
             foods={foods}
             exercises={exercises}
             profile={profile}
@@ -1035,8 +1066,11 @@ export default function Home() {
           />}
       </div>
 
+      {editingActivity&&<ActivityEditModal record={editingActivity} onClose={()=>setEditingActivity(null)} onSave={saveExercise}/>}
+      {modal === "libraryPick" && <LibraryPicker foods={foodLibrary} records={foods} date={date} onClose={() => setModal(null)} onSave={saveFood} />}
       {modal === "food" && <FoodModal onClose={() => { setEditingFood(null); setModal(null); }} onSubmit={submitFood} date={date} record={editingFood} />}
-      {modal === "exercise" && <ExerciseModal onClose={() => setModal(null)} onSubmit={submitExercise} date={date} />}
+      {modal === "exercise" && <ActivityModal entries={exerciseLibrary} records={exercises} sex={profile.sex} date={date} onClose={() => setModal(null)} onSave={saveExercise} />}
+      {modal === "walking" && <WalkingModal profiles={walkingProfiles} weights={weights} sex={profile.sex} date={date} onClose={() => setModal(null)} onSave={saveExercise} onPut={async (store,value) => { await apiRequest("/api/put", {store,value}); await refreshSharedData(); }} />}
       {modal === "weight" && <WeightModal onClose={() => { setEditingWeight(null); setModal(null); }} onSubmit={submitWeight} date={editingWeight?.date || date} record={editingWeight} />}
       {modal === "deleteWeight" && editingWeight && <DeleteWeightModal record={editingWeight} onClose={() => { setEditingWeight(null); setModal(null); }} onConfirm={() => removeWeight(editingWeight)} />}
       {modal === "baseline" && editingBaseline && <BaselineModal record={editingBaseline} onClose={() => { setEditingBaseline(null); setModal(null); }} onSubmit={submitBaseline} />}
@@ -1273,21 +1307,30 @@ function Empty({ text, hint }: { text: string; hint: string }) {
   return <div className="empty"><span>○</span><strong>{text}</strong><small>{hint}</small></div>;
 }
 
-function FoodModal({ onClose, onSubmit, date, record }: { onClose: () => void; onSubmit: (e: FormEvent<HTMLFormElement>) => void; date: string; record: FoodRecord | null }) {
-  return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}><form className="modal" onSubmit={onSubmit}>
-    <div className="modal-head"><div><p>{record ? "修正记录" : "手动录入"}</p><h2>{record ? "修改饮食" : "添加饮食"}</h2></div><button type="button" onClick={onClose}>×</button></div>
+function FoodModal({ onClose, onSubmit, date, record }: { onClose: () => void; onSubmit: (e: FormEvent<HTMLFormElement>) => Promise<void>; date: string; record: FoodRecord | null }) {
+  const [linked,setLinked]=useState(Boolean(record&&record.weight>0));
+  const [weight,setWeight]=useState(String(record?.weight||""));
+  const [values,setValues]=useState<Record<string,string>>(()=>Object.fromEntries(nutrientLabels.map(([key])=>[key,record?String(record[key]||0):""])));
+  const anchor=useRef({weight:Number(record?.weight||0),values:{...values}});
+  const [busy,setBusy]=useState(false),[error,setError]=useState("");
+  function changeWeight(next:string){setWeight(next);if(linked&&anchor.current.weight>0){setValues(Object.fromEntries(nutrientLabels.map(([key])=>[key,String(Number(anchor.current.values[key]||0)*Number(next)/anchor.current.weight)])));}}
+  function toggle(){if(!linked){if(!(Number(weight)>0))return;anchor.current={weight:Number(weight),values:{...values}};}setLinked(!linked);}
+  async function submit(e:FormEvent<HTMLFormElement>){e.preventDefault();if(busy)return;setBusy(true);setError("");try{await onSubmit(e);}catch(e){setError(e instanceof Error?e.message:"保存失败");setBusy(false);}}
+  return <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}><form className="modal" onSubmit={submit}>
+    <div className="modal-head"><div><p>{record ? "修正记录" : "手动录入"}</p><h2>{record ? "修改饮食" : "添加饮食"}</h2></div><button type="button" disabled={busy} onClick={onClose}>×</button></div>
     <div className="form-grid">
       <label className="wide">食物名称<input name="name" required autoFocus placeholder="例如：番茄炒蛋" defaultValue={record?.name || ""} /></label>
       <label>日期<input name="date" type="date" defaultValue={record?.date || date} required /></label>
       <label>时间<input name="time" type="time" defaultValue={record?.time || nowTime()} required /></label>
       <label>餐次<select name="meal" defaultValue={record?.meal || "早餐"}><option>早餐</option><option>午餐</option><option>晚餐</option><option>加餐</option><option>未注明</option></select></label>
-      <label>重量（克）<input name="weight" type="number" min="0" step="0.1" defaultValue={record?.weight || ""} /></label>
+      <label>重量（克）<input name="weight" type="number" min="0.01" step="any" required value={weight} onChange={e=>changeWeight(e.target.value)} /></label>
     </div>
+    {record&&<div className="proportional-control"><button type="button" role="switch" aria-checked={linked} disabled={busy||(!linked&&!(Number(weight)>0))} onClick={toggle}>{linked?"重量与营养挂钩":"重量与营养脱钩"}</button><p>{linked?"营养随重量等比例变化；仅改重量时，食品库只更新默认份量。":"可独立修改营养；比例改变后更新食品库每100g营养。"}</p></div>}
     <h3>热量、宏量营养与糖</h3>
-    <div className="nutrient-inputs">{nutrientLabels.slice(0, 8).map(([key, label, unit]) => <label key={key}>{label}（{unit}）<input name={key} type="number" min="0" step="0.01" defaultValue={record ? Number(record[key] || 0) : ""} /></label>)}</div>
-    <details><summary>填写维生素与矿物质（可选）</summary><div className="nutrient-inputs">{nutrientLabels.slice(8).map(([key, label, unit]) => <label key={key}>{label}（{unit}）<input name={key} type="number" min="0" step="0.01" defaultValue={record ? Number(record[key] || 0) : ""} /></label>)}</div></details>
-    <label className="wide note-label">备注<input name="note" placeholder="品牌、烹饪方式或数据来源" defaultValue={record?.note || ""} /></label>
-    <div className="modal-actions"><button type="button" onClick={onClose}>取消</button><button className="primary">{record ? "保存修改" : "保存饮食"}</button></div>
+    <div className="nutrient-inputs">{nutrientLabels.slice(0, 8).map(([key, label, unit]) => <label key={key}>{label}（{unit}）<input name={key} type="number" min="0" step="any" readOnly={linked} value={values[key]} onChange={e=>setValues({...values,[key]:e.target.value})} /></label>)}</div>
+    <details><summary>填写维生素与矿物质（可选）</summary><div className="nutrient-inputs">{nutrientLabels.slice(8).map(([key, label, unit]) => <label key={key}>{label}（{unit}）<input name={key} type="number" min="0" step="any" readOnly={linked} value={values[key]} onChange={e=>setValues({...values,[key]:e.target.value})} /></label>)}</div></details>
+    <label className="wide note-label">备注<input name="note" placeholder="份量、克重说明、做法或数据来源（名称只写食品名）" defaultValue={record?.note || ""} /></label>
+    {error&&<p role="alert">{error}</p>}<div className="modal-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary" disabled={busy}>{record ? "保存修改" : "保存饮食"}</button></div>
   </form></div>;
 }
 
@@ -1384,7 +1427,8 @@ function ProfileModal({ onClose, onSubmit, profile }: { onClose: () => void; onS
   </form></div>;
 }
 
-function LlmConfigModal({ onClose, onSave, config }: { onClose: () => void; onSave: (value: { baseUrl: string; apiKey: string; model: string; systemPrompt: string; enableSearch: boolean }) => Promise<void>; config: LlmConfig }) {
+function LlmConfigModal({ onClose, onSave, config }: { onClose: () => void; onSave: (value: { proxyMode?: string; proxyUrl?: string; headerPreset?: string; customHeaders?: string; baseUrl: string; apiKey: string; model: string; systemPrompt: string; enableSearch: boolean }) => Promise<void>; config: LlmConfig }) {
+  const [proxyMode,setProxyMode]=useState(config.proxyMode||"auto");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -1393,6 +1437,8 @@ function LlmConfigModal({ onClose, onSave, config }: { onClose: () => void; onSa
     setSaving(true); setError("");
     try {
       await onSave({
+        proxyMode,proxyUrl:String(form.get("proxyUrl")??config.proxyUrl??""),
+        headerPreset:String(form.get("headerPreset")||"auto"),customHeaders:String(form.get("customHeaders")||"{}"),
         baseUrl: String(form.get("baseUrl")),
         apiKey: String(form.get("apiKey")),
         model: String(form.get("model")),
@@ -1412,6 +1458,12 @@ function LlmConfigModal({ onClose, onSave, config }: { onClose: () => void; onSa
         <label className="wide">OpenAI 兼容接口地址<input name="baseUrl" required defaultValue={config.baseUrl} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" /></label>
         <label>模型名称<input name="model" required defaultValue={config.model} placeholder="qwen-plus" /></label>
         <label>API Key<input name="apiKey" type="password" placeholder={config.configured ? "已保存；留空表示不修改" : "sk-…"} required={!config.configured} /></label>
+        <label>连接方式<select name="proxyMode" value={proxyMode} onChange={e=>setProxyMode(e.target.value)}><option value="auto">自动 · 系统代理不可用时直连</option><option value="direct">直连 · 不使用应用层代理</option><option value="system">仅使用系统代理设置</option><option value="custom">自定义代理</option></select></label>
+        <label>代理地址<input name="proxyUrl" disabled={proxyMode!=="custom"} required={proxyMode==="custom"} defaultValue={config.proxyUrl||""} placeholder="http://127.0.0.1:7890"/></label>
+        <p className="wide">自动模式跟随 Windows 系统代理开关；失效的代理连接会回退直连。强制代理模式不回退。TUN / VPN 的系统路由仍由对应软件控制。</p>
+        <label className="wide">请求头预设<select name="headerPreset" defaultValue={config.headerPreset||"auto"}><option value="auto">自动识别 · OpenCode 自动补齐会话头</option><option value="standard">标准 OpenAI 兼容</option><option value="opencode">OpenCode · 稳定会话 ID</option></select></label>
+        <label className="wide">自定义请求头（JSON，可留空）<textarea name="customHeaders" rows={4} defaultValue={config.customHeaders||"{}"} placeholder={'{"X-Custom-Header":"value"}'}/></label>
+        <p className="wide">自定义值优先于预设，仅保存在本机。OpenCode 会话 ID 自动生成，同一对话保持稳定；清空对话后更换。客户端标识使用本软件名称。OpenCode Go 官方主要面向编程代理，是否接受营养助手用途由服务方决定。</p>
         <label className="search-toggle wide"><input name="enableSearch" type="checkbox" defaultChecked={config.enableSearch} /><span>允许模型联网搜索（Qwen Chat Completions 使用 enable_search）</span></label>
       </div>
     </section>
@@ -1821,7 +1873,6 @@ function BodyDualTrendChart({ weights, baselineMultipliers, range: selectedRange
   const [tooltip, setTooltip] = useState<ChartTooltipState>(null);
   const weightByDate = new Map(weights.map((item) => [item.date, item]));
   const baselineByDate = new Map(baselineMultipliers.map((item) => [item.date, item]));
-  if (!showWeight && !showBaseline) return <Empty text="两条趋势都已隐藏" hint="在上方至少开启体重或基线系数中的一项" />;
   const { recordedDates, axisDates: dates } = selectBodyTrendDatesForUi({
     weightDates: [...weightByDate.keys()],
     baselineDates: [...baselineByDate.keys()],
@@ -1830,6 +1881,8 @@ function BodyDualTrendChart({ weights, baselineMultipliers, range: selectedRange
     showBaseline,
     skipEmpty,
   });
+  const { latestScroll, viewportWidth } = useLatestChartScroll([selectedRange, bucket, skipEmpty, showWeight, showBaseline, recordedDates.join(",")].join("|"));
+  if (!showWeight && !showBaseline) return <Empty text="两条趋势都已隐藏" hint="在上方至少开启体重或基线系数中的一项" />;
   if (recordedDates.length === 0) return <Empty text="当前显示项没有身体趋势记录" hint="记录当前开启的体重或基线系数后，这里会显示趋势" />;
   const daily = dates.map((date) => {
     const weight = weightByDate.get(date);
@@ -1861,7 +1914,7 @@ function BodyDualTrendChart({ weights, baselineMultipliers, range: selectedRange
   });
   const weightActual = data.map((item, index) => ({ item, index })).filter(({ item }) => item.weightRecorded);
   const baselineActual = data.map((item, index) => ({ item, index })).filter(({ item }) => item.baselineRecorded);
-  const width = Math.max(760, (data.length - 1) * 42 + 118), height = 310, left = 60, right = 60, top = 34, bottom = 48;
+  const width = Math.max(viewportWidth, (data.length - 1) * Math.max(1, (viewportWidth - 120) / 59) + 120), height = 310, left = 60, right = 60, top = 34, bottom = 48;
   const weightValues = weightActual.map(({ item }) => item.weight);
   const baselineValues = baselineActual.map(({ item }) => item.multiplier);
   const weightMin = weightValues.length ? Math.floor((Math.min(...weightValues) - 1) * 10) / 10 : 0;
@@ -1880,9 +1933,9 @@ function BodyDualTrendChart({ weights, baselineMultipliers, range: selectedRange
   const baselinePoints = baselineActual.map(({ item, index }) => `${x(index)},${baselineY(item.multiplier)}`).join(" ");
   const weightTicks = [weightMax, Number(((weightMax + weightMin) / 2).toFixed(1)), weightMin];
   const baselineTicks = [baselineMax, Number(((baselineMax + baselineMin) / 2).toFixed(2)), baselineMin];
-  const labelEvery = data.length > 18 ? 3 : data.length > 9 ? 2 : 1;
+  const labelEvery = Math.max(1, Math.ceil(60 / ((width - left - right) / Math.max(1, data.length - 1))));
   return <div className="weight-chart body-dual-chart">
-    <div className="chart-scroll"><svg style={{ minWidth: `${width}px` }} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`体重与居家久坐基线系数双轴趋势图，共 ${data.length} 个日期数据点`}>
+    <div className="chart-scroll" ref={latestScroll}><svg style={{ minWidth: `${width}px` }} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`体重与居家久坐基线系数双轴趋势图，共 ${data.length} 个日期数据点`}>
       <desc>横轴为日期，左轴为体重千克，右轴为居家久坐基线系数。</desc>
       {[top, top + plotHeight / 2, top + plotHeight].map((gridY) => <line key={gridY} x1={left} x2={width - right} y1={gridY} y2={gridY} className="chart-grid" />)}
       {showWeight && weightTicks.map((tick) => <text key={`weight-${tick}`} x={left - 10} y={weightY(tick) + 4} textAnchor="end" className="body-weight-axis">{tick.toFixed(1)}</text>)}
@@ -1910,7 +1963,9 @@ function ActionHelp({ hint, children }: { hint: string; children: ReactNode }) {
   </span>;
 }
 
-function History({ foods, exercises, profile, weights, baselineMultipliers, targetScenarios, targetScenarioDefaults, energyTargetDays, energyTargetDefaults, llmConfig, onOpenConfig, onDataChanged }: {
+function History({ exerciseLibrary,walkingProfiles,foodLibrary, foods, exercises, profile, weights, baselineMultipliers, targetScenarios, targetScenarioDefaults, energyTargetDays, energyTargetDefaults, llmConfig, onOpenConfig, onDataChanged }: {
+  exerciseLibrary: ActivityEntry[]; walkingProfiles: WalkingProfile[];
+  foodLibrary: LibraryFood[];
   foods: FoodRecord[];
   exercises: ExerciseRecord[];
   profile: Profile;
@@ -2151,6 +2206,9 @@ function History({ foods, exercises, profile, weights, baselineMultipliers, targ
         <MacroTrendChart foods={foods} profile={profile} weights={weights} baselineMultipliers={baselineMultipliers} targetScenarios={targetScenarios} targetScenarioDefaults={targetScenarioDefaults} energyTargetDays={energyTargetDays} energyTargetDefaults={energyTargetDefaults} range={trendRange} bucket={trendBucket} skipEmpty={trendSkipEmpty} />
       </article>
     </div>
+    <FoodLibraryOverview foods={foodLibrary} onChanged={onDataChanged} />
+    <WalkingPanel profiles={walkingProfiles} weights={weights} sex={profile.sex} onPut={async (store,value) => { await apiRequest("/api/put", {store,value}); await onDataChanged(); }} />
+    <ActivityPanel entries={exerciseLibrary} Pagination={PaginationControls} onPut={async (store,value) => { await apiRequest("/api/put", {store,value}); await onDataChanged(); }} onDelete={async (store,id) => { await apiRequest("/api/delete", {store,id}); await onDataChanged(); }} />
     <div className="section-title history-record-title paginated-section-title"><div><p>每日汇总</p><h2>记录明细</h2></div><div className="history-period-filter">
       <label><span>年份</span><select value={recordYear} onChange={(event) => { setRecordYear(event.target.value); setRecordMonth("all"); historyPagination.setPage(1); }}><option value="all">全部年份</option>{recordYears.map((year) => <option key={year} value={year}>{year} 年</option>)}</select></label>
       <label><span>月份</span><select value={recordMonth} disabled={recordYear === "all"} onChange={(event) => { setRecordMonth(event.target.value); historyPagination.setPage(1); }}><option value="all">全年</option>{Array.from({ length: 12 }, (_, index) => String(index + 1).padStart(2, "0")).map((month) => <option key={month} value={month}>{Number(month)} 月</option>)}</select></label>
@@ -2174,9 +2232,32 @@ function History({ foods, exercises, profile, weights, baselineMultipliers, targ
   </section>;
 }
 
+function useLatestChartScroll(key: string) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [viewportWidth, setViewportWidth] = useState(900);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => setViewportWidth(element.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [key]);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    element.scrollLeft = element.scrollWidth;
+    const frame = requestAnimationFrame(() => { element.scrollLeft = element.scrollWidth; });
+    return () => cancelAnimationFrame(frame);
+  }, [key, viewportWidth]);
+  return { latestScroll: ref, viewportWidth };
+}
+
 function CalorieBalanceTrendChart({ foods, exercises, profile, weights, baselineMultipliers, targetScenarios, targetScenarioDefaults, energyTargetDays, energyTargetDefaults, range, bucket, skipEmpty }: { foods: FoodRecord[]; exercises: ExerciseRecord[]; profile: Profile; weights: WeightRecord[]; baselineMultipliers: BaselineMultiplierRecord[]; targetScenarios: TargetScenarioDayRecord[]; targetScenarioDefaults: TargetScenarioDefaultRecord[]; energyTargetDays: EnergyTargetDayRecord[]; energyTargetDefaults: EnergyTargetDefaultRecord[]; range: TrendRange; bucket: TrendBucket; skipEmpty: boolean }) {
   const [tooltip, setTooltip] = useState<ChartTooltipState>(null);
   const recordedDates = filterTrendDates([...new Set([...foods.map((item) => item.date), ...exercises.map((item) => item.date)])].sort(), range);
+  const { latestScroll, viewportWidth } = useLatestChartScroll([range, bucket, skipEmpty, recordedDates.join(",")].join("|"));
   if (recordedDates.length === 0) return <Empty text="还没有能量趋势" hint="记录饮食或运动后，这里会显示净摄入与运动消耗" />;
   const dates = trendAxisDates(recordedDates, skipEmpty);
   const daily = dates.map((date) => {
@@ -2192,7 +2273,7 @@ function CalorieBalanceTrendChart({ foods, exercises, profile, weights, baseline
     second: current,
     gap: current.index - actual[index].index > 1,
   }));
-  const width = Math.max(900, (data.length - 1) * 42 + 88), height = 410, left = 64, right = 24, top = 32, bottom = 54;
+  const width = Math.max(viewportWidth, (data.length - 1) * Math.max(1, (viewportWidth - 88) / 44) + 88), height = 410, left = 64, right = 24, top = 32, bottom = 54;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const rawMax = Math.max(0, ...actual.map(({ item }) => item.net), ...data.map((item) => item.target));
   const rawMin = Math.min(0, ...actual.map(({ item }) => item.exercise));
@@ -2202,7 +2283,7 @@ function CalorieBalanceTrendChart({ foods, exercises, profile, weights, baseline
   const y = (value: number) => top + (yMax - value) / (yMax - yMin) * plotHeight;
   const targetPoints = data.map((item, index) => `${x(index)},${y(item.target)}`).join(" ");
   const tickValues = Array.from({ length: 5 }, (_, index) => yMax - index * (yMax - yMin) / 4);
-  const labelEvery = data.length > 8 ? 2 : 1;
+  const labelEvery = Math.max(1, Math.ceil(60 / ((width - left - right) / Math.max(1, data.length - 1))));
   return <div className="trend-chart calorie-balance-chart">
     <div className="trend-legend">
       <span><i className="net-swatch" />净摄入（摄入 − 运动）</span>
@@ -2210,7 +2291,7 @@ function CalorieBalanceTrendChart({ foods, exercises, profile, weights, baseline
       <span><i className="intake-area-swatch" />两线之间＝摄入热量</span>
       <em>虚线为净摄入参考值</em>
     </div>
-    <div className="chart-scroll"><svg style={{ minWidth: `${width}px` }} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`净摄入、运动消耗和摄入热量面积趋势图，共 ${data.length} 个数据点`}>
+    <div className="chart-scroll" ref={latestScroll}><svg style={{ minWidth: `${width}px` }} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`净摄入、运动消耗和摄入热量面积趋势图，共 ${data.length} 个数据点`}>
       <desc>上方橙色点为摄入减运动后的净摄入，下方蓝色点为负向运动消耗，两者之间的半透明面积代表摄入热量。</desc>
       <defs>
         <linearGradient id="calorie-intake-area" gradientUnits="userSpaceOnUse" x1="0" y1={top} x2="0" y2={height - bottom}>
@@ -2255,6 +2336,7 @@ function MacroTrendChart({ foods, profile, weights, baselineMultipliers, targetS
   const [visible, setVisible] = useState<Record<MacroKey, boolean>>({ protein: true, carbs: true, fat: true });
   const [referenceVisible, setReferenceVisible] = useState<Record<MacroKey, boolean>>({ protein: true, carbs: true, fat: true });
   const [tooltip, setTooltip] = useState<ChartTooltipState>(null);
+  const { latestScroll, viewportWidth } = useLatestChartScroll([range, bucket, skipEmpty, recordedDates.join(",")].join("|"));
   if (recordedDates.length === 0) return <Empty text="还没有营养趋势" hint="记录饮食后，这里会显示蛋白质、碳水与脂肪变化" />;
   const daily = dates.map((date) => {
     const day = foods.filter((item) => item.date === date);
@@ -2280,7 +2362,7 @@ function MacroTrendChart({ foods, profile, weights, baselineMultipliers, targetS
   ];
   const enabled = series.filter((item) => visible[item.key]);
   const referenceEnabled = series.filter((item) => referenceVisible[item.key]);
-  const width = Math.max(900, (data.length - 1) * 42 + 82), height = 360, left = 58, right = 24, top = 30, bottom = 52;
+  const width = Math.max(viewportWidth, (data.length - 1) * Math.max(1, (viewportWidth - 82) / 44) + 82), height = 360, left = 58, right = 24, top = 30, bottom = 52;
   const plotWidth = width - left - right, plotHeight = height - top - bottom;
   const activeValues = enabled.flatMap(({ key }) => actual.map(({ item }) => item[key]));
   const targetKey = (key: MacroKey) => `target${key[0].toUpperCase()}${key.slice(1)}` as "targetProtein" | "targetCarbs" | "targetFat";
@@ -2366,7 +2448,7 @@ function MacroTrendChart({ foods, profile, weights, baselineMultipliers, targetS
       }
     }
   }
-  const labelEvery = data.length > 8 ? 2 : 1;
+  const labelEvery = Math.max(1, Math.ceil(60 / ((width - left - right) / Math.max(1, data.length - 1))));
   return <div className="trend-chart macro-chart">
     <div className="macro-toggle-block">
       <div className="macro-switches" aria-label="选择显示的实际摄入">
@@ -2379,7 +2461,7 @@ function MacroTrendChart({ foods, profile, weights, baselineMultipliers, targetS
         <span>参考目标随历史体重与基线系数变化</span>
       </div>
     </div>
-    <div className="chart-scroll"><svg style={{ minWidth: `${width}px` }} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`三大营养素趋势图，当前显示${enabled.map((item) => item.label).join("、") || "无"}`}>
+    <div className="chart-scroll" ref={latestScroll}><svg style={{ minWidth: `${width}px` }} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`三大营养素趋势图，当前显示${enabled.map((item) => item.label).join("、") || "无"}`}>
       <desc>可分别显示或隐藏蛋白质、碳水、脂肪及其参考目标。</desc>
       <defs>
         {referenceBandPaths.map((band) => {
@@ -2636,4 +2718,97 @@ function guessMeal() {
   if (hour < 15) return "午餐";
   if (hour < 21) return "晚餐";
   return "加餐";
+}
+
+function LibraryNutrients({ food }: { food: Nutrients & {reportedNutrients?:string[]} }) {
+  return <div className="library-nutrients">{nutrientLabels.map(([key, label, unit]) => <span key={key}>{label} <b>{food.reportedNutrients&&!food.reportedNutrients.includes(key)?"未报告":Number(food[key] || 0).toLocaleString("zh-CN", { maximumFractionDigits: 2 })}</b> {unit}</span>)}</div>;
+}
+
+function LibraryPicker({ foods, records, date, onClose, onSave }: { foods: LibraryFood[]; records: FoodRecord[]; date: string; onClose: () => void; onSave: (food: FoodRecord) => Promise<void> }) {
+  const [selectedId, setSelectedId] = useState("");
+  const [grams, setGrams] = useState("100");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const selected = foods.find(food => food.id === selectedId);
+  const valid = Number.isFinite(Number(grams)) && Number(grams) > 0;
+  let scaled: Nutrients | null = null;
+  try { if (selected && valid) scaled = scaleNutrients(selected, Number(grams)) as Nutrients; } catch {}
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy || !selected || !scaled) return;
+    const form = new FormData(event.currentTarget);
+    setBusy(true); setError("");
+    try {
+      await onSave({ ...scaled, id: uid(), name: selected.name, weight: Number(grams), date: String(form.get("date")), time: String(form.get("time")), meal: String(form.get("meal")), note: selected.note });
+      onClose();
+    } catch (error) { setError(error instanceof Error ? error.message : "添加失败，请重试"); }
+    finally { setBusy(false); }
+  }
+  return <div className="modal-backdrop"><form className="modal library-picker directory-modal" role="dialog" aria-modal="true" aria-labelledby="library-picker-title" onSubmit={submit}>
+    <div className="modal-head"><div><p>食品库</p><h2 id="library-picker-title">选择已记录过的食物</h2></div><button type="button" disabled={busy} onClick={onClose} aria-label="关闭">×</button></div>
+    <ContactDirectory onDeselect={()=>setSelectedId("")} items={foods} records={records} storageKey="food-directory-v1" keyOf={record=>libraryId(record.name)} selected={selectedId} onSelect={food=>{setSelectedId(food.id);setGrams(String(food.defaultServingGrams||100));}} summary={food=>food.calories.toFixed(1)+" kcal / 100 g"} busy={busy}>
+    <div className="form-grid"><label>重量（克）<input type="number" min="0.01" step="any" value={grams} onChange={event => setGrams(event.target.value)} required /></label><label>日期<input name="date" type="date" defaultValue={date} required /></label><label>时间<input name="time" type="time" defaultValue={nowTime()} required /></label><label>餐次<select name="meal" defaultValue="午餐"><option>早餐</option><option>午餐</option><option>晚餐</option><option>加餐</option></select></label></div>
+    {selected && <><h3>{selected.name} · {grams || "0"} g</h3><p>默认份量：{selected.defaultServingGrams||100} g · {selected.servingBasis||"可按实际食用量调整"}</p></>}
+    {scaled && <LibraryNutrients food={{...scaled,reportedNutrients:(selected as LibraryFood & {reportedNutrients?:string[]})?.reportedNutrients}} />}
+    {selected?.note&&<details><summary>来源与适用说明</summary><p>{selected.note}</p></details>}
+    </ContactDirectory>
+    {error && <p role="alert">{error}</p>}
+    <div className="modal-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary" disabled={busy || !scaled}>{busy ? "正在添加…" : "添加饮食记录"}</button></div>
+  </form></div>;
+}
+
+function FoodLibraryOverview({ foods, onChanged }: { foods: LibraryFood[]; onChanged: () => Promise<void> }) {
+  const [draft, setDraft] = useState("");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState("name");
+  const [direction, setDirection] = useState("asc");
+  const [editing, setEditing] = useState<LibraryFood | null | undefined>(undefined);
+  const [deleting, setDeleting] = useState<LibraryFood | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const filtered = sortLibraryFoods(foods, query, sort, direction) as LibraryFood[];
+  const pagination = usePaginatedItems(filtered);
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (busy) return;
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") || "").trim();
+    if (!editing && foods.some(food => libraryId(food.name) === libraryId(name))) { setError("食品库已有同名食品，请修改已有记录"); return; }
+    const value = { defaultServingGrams:Number(form.get("defaultServingGrams")), reportedNutrients:nutrientLabels.filter(([key])=>String(form.get(key)||" ").trim()!=="").map(([key])=>key), ...Object.fromEntries(nutrientLabels.map(([key]) => [key, Number(form.get(key) || 0)])), id: editing?.id || libraryId(name), name, weight: 100, note: String(form.get("note") || "") };
+    setBusy(true); setError("");
+    try { await apiRequest("/api/put", { store: "foodLibrary", value }); await onChanged(); setEditing(undefined); }
+    catch (error) { setError(error instanceof Error ? error.message : "保存失败"); }
+    finally { setBusy(false); }
+  }
+  async function remove() {
+    if (!deleting || busy) return;
+    setBusy(true); setError("");
+    try { await apiRequest("/api/delete", { store: "foodLibrary", id: deleting.id }); await onChanged(); setDeleting(null); }
+    catch (error) { setError(error instanceof Error ? error.message : "删除失败"); }
+    finally { setBusy(false); }
+  }
+  return <section className="food-library-section">
+    <div className="section-title history-record-title"><div><p>食品数据库</p><h2>每 100 g 营养概览</h2></div><button onClick={() => { setError(""); setEditing(null); }}>＋ 新增食品</button></div>
+    <p>从带有有效克重的饮食记录自动换算；修改食品库只影响之后的快捷添加。</p>
+    <form className="library-toolbar" onSubmit={event => { event.preventDefault(); setQuery(draft); pagination.setPage(1); }}>
+      <label>搜索食品<input value={draft} onChange={event => setDraft(event.target.value)} placeholder="名称或备注" /></label><button>搜索</button>
+      <label>排序方式<select value={sort} onChange={event => { setSort(event.target.value); pagination.setPage(1); }}><option value="name">字母 / 汉字拼音</option><option value="createdAt">初次记录时间</option><option value="updatedAt">最近修改时间</option><option value="calories">每百克热量</option><option value="protein">每百克蛋白质</option></select></label>
+      <label>顺序<select value={direction} onChange={event => { setDirection(event.target.value); pagination.setPage(1); }}><option value="asc">正序（从小到大）</option><option value="desc">倒序（从大到小）</option></select></label>
+    </form>
+    <div className="library-cards">{pagination.pageItems.map(food => <article className="library-card" key={food.id}>
+      <div className="section-title"><h3>{food.name}</h3><div className="library-actions"><button onClick={() => { setError(""); setEditing(food); }}>修改</button><button onClick={() => { setError(""); setDeleting(food); }}>删除</button></div></div>
+      <p>默认份量：<strong>{food.defaultServingGrams||100} g</strong> · {food.servingBasis||"可手动修改"}</p><p><strong>{Number(food.calories).toFixed(1)} kcal</strong> · 蛋白质 {Number(food.protein).toFixed(2)} g · 碳水 {Number(food.carbs).toFixed(2)} g · 脂肪 {Number(food.fat).toFixed(2)} g</p>
+      <div className="library-times"><span>初次记录：{new Date(food.createdAt).toLocaleString("zh-CN")}</span><span>最近修改：{new Date(food.updatedAt).toLocaleString("zh-CN")}</span></div>
+      {food.note && <p>{food.note}</p>}<details><summary>全部营养素 / 100 g</summary><LibraryNutrients food={food} /></details>
+    </article>)}</div>
+    {!filtered.length && <Empty text={query ? "没有搜索结果" : "食品库暂无记录"} hint="可新增食品，或记录包含有效克重的饮食" />}
+    <PaginationControls totalItems={filtered.length} page={pagination.page} pageSize={pagination.pageSize} totalPages={pagination.totalPages} onPageChange={pagination.setPage} onPageSizeChange={pagination.setPageSize} />
+    {editing !== undefined && <div className="modal-backdrop"><form className="modal" role="dialog" aria-modal="true" aria-labelledby="library-edit-title" onSubmit={save}>
+      <div className="modal-head"><h2 id="library-edit-title">{editing ? "修改食品" : "新增食品"} · 每 100 g</h2><button type="button" disabled={busy} onClick={() => setEditing(undefined)} aria-label="关闭">×</button></div>
+      <label>食品名称<input name="name" autoFocus required defaultValue={editing?.name || ""} /></label><label>默认份量（克）<input name="defaultServingGrams" type="number" min="0.01" step="any" required defaultValue={editing?.defaultServingGrams||100}/></label>
+      <div className="nutrient-inputs">{nutrientLabels.map(([key, label, unit]) => <label key={key}>{label}（{unit}）<input name={key} type="number" min="0" step="any" defaultValue={editing?.reportedNutrients&&!editing.reportedNutrients.includes(key)?"":editing?.[key] ?? 0} placeholder="未报告" /></label>)}</div>
+      <label>备注<input name="note" defaultValue={editing?.note || ""} /></label>{error && <p role="alert">{error}</p>}
+      <div className="modal-actions"><button type="button" disabled={busy} onClick={() => setEditing(undefined)}>取消</button><button className="primary" disabled={busy}>{busy ? "保存中…" : "保存食品"}</button></div>
+    </form></div>}
+    {deleting && <div className="modal-backdrop"><section className="modal compact" role="dialog" aria-modal="true" aria-labelledby="library-delete-title"><h2 id="library-delete-title">删除 {deleting.name}？</h2><p>已有饮食记录会保留。删除状态会同步到其他设备，旧饮食记录不会自动重新生成这项食品。</p>{error && <p role="alert">{error}</p>}<div className="modal-actions"><button disabled={busy} onClick={() => setDeleting(null)}>取消</button><button className="primary" disabled={busy} onClick={remove}>{busy ? "删除中…" : "确认删除"}</button></div></section></div>}
+  </section>;
 }

@@ -1,6 +1,6 @@
 {
   "name": "daily-intake-tracker",
-  "version": "2.18.1",
+  "version": "3.6.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -9,13 +9,14 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "pnpm run build && node --test tests/body-trend-dates.test.mjs tests/energy-target-status.test.mjs tests/energy-balance-targets.test.mjs tests/macro-targets.test.mjs tests/target-scenarios.test.mjs tests/rendered-html.test.mjs tests/sync-engine.test.mjs tests/llm-record-tools.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "test": "pnpm run build && node --test tests/body-trend-dates.test.mjs tests/energy-target-status.test.mjs tests/energy-balance-targets.test.mjs tests/macro-targets.test.mjs tests/target-scenarios.test.mjs tests/rendered-html.test.mjs tests/sync-engine.test.mjs tests/llm-record-tools.test.mjs tests/food-library.test.mjs tests/food-name.test.mjs tests/exercise-library.test.mjs tests/llm-batch-servings.test.mjs tests/contact-order.test.mjs tests/model-network.test.mjs",
+    "lint": "eslint app db electron examples scripts tests worker vite.config.ts next.config.ts drizzle.config.ts eslint.config.mjs --ignore-pattern '*.bundle.mjs'",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
+    "pinyin-pro": "^3.29.3",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },

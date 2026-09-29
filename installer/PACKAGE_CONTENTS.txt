@@ -1,17 +1,15 @@
-Daily Intake 1.0.0 - clean application package
+Daily Intake 3.6.0 — Electron package contents
 
 Included:
-- Compiled application interface
-- Local API service source
-- Minimal Node.js runtime
-- Minimal Python standard-library runtime
-- Application icon and launch/uninstall scripts
+- Compiled desktop interface and Electron entry point
+- Local API and synchronization modules
+- Public starter catalog: 29 foods and 56 exercise entries
+- Application icons and Electron Builder configuration
 
-Intentionally excluded:
-- data/food_manage.sqlite
-- data/api_token.txt
-- API keys and LLM settings
-- Food, exercise, profile and weight records
-- Chat and analysis history
-- Logs, exports and backup files
-- Browser profiles, cookies and local storage
+Excluded:
+- Personal SQLite databases and activity records
+- API keys, external API tokens, custom request headers and LLM settings
+- Cloud synchronization folders, backups, logs and browser profiles
+
+The old DailyIntake.sed / Install.vbs path targets a legacy Python package.
+Build the current desktop package from installer/electron-app/package.json.

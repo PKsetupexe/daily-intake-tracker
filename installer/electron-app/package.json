@@ -1,6 +1,6 @@
 {
   "name": "daily-intake-desktop",
-  "version": "2.18.1",
+  "version": "3.6.0",
   "private": true,
   "type": "module",
   "main": "main.mjs",
@@ -29,7 +29,7 @@
       }
     ],
     "directories": {
-      "output": "../electron-output-v2.18.1"
+      "output": "../electron-output-v3.6.0"
     },
     "win": {
       "target": [
@@ -54,5 +54,6 @@
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true
     }
-  }
+  },
+  "packageManager": "npm@10.9.3"
 }

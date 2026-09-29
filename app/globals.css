@@ -1049,3 +1049,85 @@ summary { cursor: pointer; color: var(--green); font-size: 12px; font-weight: 70
   .theme-choices i { color: #a7d7bb; background: rgba(121,186,151,.12); }
   .theme-choices em { color: #a7d7bb; }
 }
+
+/* Food library follows existing cards, forms, and theme tokens. */
+.library-actions, .library-toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+.library-toolbar { margin: 20px 0; }
+.library-toolbar label { display: grid; gap: 6px; flex: 1 1 180px; }
+.library-cards { display: grid; gap: 14px; }
+.library-card { border: 1px solid var(--line); border-radius: 16px; padding: 20px; background: var(--paper); overflow-wrap: anywhere; }
+.library-card h3 { margin: 0; }
+.library-times { display: flex; gap: 16px; flex-wrap: wrap; font-size: 14px; opacity: .8; }
+.library-nutrients { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 10px; padding: 14px 0; font-size: 14px; }
+.library-pick-list { display: grid; gap: 8px; margin-top: 12px; }
+.library-pick-list button { display: flex; justify-content: space-between; gap: 12px; text-align: left; }
+.library-pick-list button[aria-pressed="true"] { outline: 2px solid currentColor; }
+.food-library-section { margin: 28px 0; }
+.library-picker .form-grid { margin-top: 18px; }
+@media (max-width: 600px) { .library-card .section-title { align-items: start; flex-direction: column; gap: 12px; } .library-pick-list button { flex-wrap: wrap; } }
+
+.library-toolbar button, .library-card button, .library-pick-list button { padding: 9px 14px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: var(--mint); font-size: 14px; }
+.food-library-section > p, .library-card p { text-transform: none; letter-spacing: normal; font-weight: 400; font-size: 14px; margin: 10px 0; }
+.library-toolbar input, .library-toolbar select { width: 100%; min-width: 0; padding: 9px; border: 1px solid var(--line); border-radius: 8px; }
+.history > .food-library-section { order: 4; }
+
+.walking-settings, .activity-library { order: 4; }
+.walking-rate { font-size: 22px; padding: 10px 0; }.walking-rate span { font-size: 16px; }
+.activity-mode { margin-bottom: 20px; }.activity-mode button { padding: 10px 14px; border-radius: 9px; border: 1px solid var(--line); color: var(--ink); background: var(--mint); }.activity-mode button[aria-pressed="true"] { outline: 2px solid var(--green); }
+.walking-settings label, .activity-library label { display: grid; gap: 6px; }
+.walking-settings select, .activity-library select { padding: 9px; border: 1px solid var(--line); border-radius: 8px; }
+
+/* Prominent, keyboard-accessible recording actions on the home page. */
+.home-record-actions { gap: 10px; align-items: stretch; }
+.home-record-actions > button {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 11px 18px;
+  border: 1px solid var(--green); border-radius: 11px;
+  background: var(--green); color: var(--paper);
+  font-size: 15px; font-weight: 700; line-height: 1.4;
+  box-shadow: 0 3px 7px rgb(0 0 0 / 14%);
+  transition: background-color .15s, box-shadow .15s, transform .15s;
+}
+.home-record-actions > button:hover {
+  background: color-mix(in srgb, var(--green) 87%, var(--ink));
+  box-shadow: 0 5px 12px rgb(0 0 0 / 20%); transform: translateY(-1px);
+}
+.home-record-actions > button:active { transform: translateY(1px); box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.home-record-actions > button:focus-visible { outline: 3px solid var(--green); outline-offset: 3px; }
+.movement-card .home-record-actions > button { flex: 1 1 110px; }
+@media (max-width: 600px) {
+  .section-title:has(> .home-record-actions) { flex-wrap: wrap; gap: 14px; }
+  .section-title > .home-record-actions { width: 100%; }
+  .home-record-actions > button { flex: 1 1 auto; padding-inline: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-record-actions > button { transition: none; }
+  .home-record-actions > button:hover, .home-record-actions > button:active { transform: none; }
+}
+
+/* Contact pickers keep controls visible while only the directory scrolls. */
+.modal.directory-modal{display:flex;flex-direction:column;width:min(900px,100%);height:min(860px,90dvh);max-height:90dvh;overflow:hidden;gap:12px}
+.directory-modal>.modal-head,.directory-modal>.modal-actions,.directory-modal>.directory-toolbar,.directory-modal>.activity-mode,.directory-modal>label{flex-shrink:0;margin-top:0;margin-bottom:0}
+.directory-modal>.modal-actions{border-top:1px solid var(--line);padding-top:12px}
+.directory-toolbar{display:flex;align-items:end;gap:12px}
+.directory-toolbar>label{flex:1;min-width:0}
+.directory-sort{display:flex;gap:4px;padding:4px;background:var(--mint);border-radius:12px}
+.directory-sort button{white-space:nowrap;padding:11px 12px;border-radius:9px}
+.directory-sort button[aria-pressed=true]{background:var(--green);color:var(--paper)}
+.directory-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding-right:8px}
+.directory-group>h3{position:sticky;top:0;z-index:1;background:var(--paper);padding:10px 6px;margin:0;font-size:15px;color:var(--green);border-bottom:1px solid var(--line)}
+.directory-card{border:1px solid var(--line);border-radius:12px;margin:8px 0;background:var(--mint);overflow:hidden}
+.directory-card[data-selected=true]{border-color:var(--green)}
+.directory-row{display:flex;align-items:center;gap:8px;padding-right:10px}
+.directory-select{flex:1;min-width:0;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;text-align:left;background:transparent;border:0;padding:16px}
+.directory-select strong{overflow-wrap:anywhere}
+.directory-select span{font-size:14px}
+.directory-select .directory-meta{margin-left:auto;display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:16px;text-align:right}
+.directory-meta>span,.directory-meta>small{white-space:nowrap}
+.directory-select small{font-size:11px;opacity:.7}
+.directory-pin{flex-shrink:0;font-size:12px;padding:8px}
+.directory-detail{background:var(--paper);padding:16px;border-top:1px solid var(--line)}
+.directory-detail .form-grid{margin-top:0}
+@media(max-width:540px){.modal.directory-modal{padding:16px;height:92dvh;max-height:92dvh}.directory-toolbar{gap:6px}.directory-sort button{font-size:12px;padding:11px 7px}.directory-select{padding:12px}.directory-select span{font-size:12px}.directory-modal h2{font-size:24px}}
+
+.proportional-control{padding:14px;border-radius:12px;background:var(--mint);margin:16px 0}.proportional-control button[aria-checked=true]{background:var(--green);color:var(--paper)}.proportional-control p{font-size:13px;margin:10px 0 0}input[readonly]{opacity:.7;cursor:default}

@@ -1,4 +1,11 @@
-import { app, BrowserWindow, dialog, Menu, shell } from "electron";
+import {validateConnection,completionUrl,modelHeaders,createModelTransport} from "./model-network.mjs";
+import {expandRecordActions,numericValue,durationMinutes,BATCH_RECORD_RULES} from './llm-batch.mjs';
+import {STARTER_CATALOG} from './starter-catalog.mjs';
+import { EXERCISE_RULES } from './exercise-rules.mjs';
+import { getWalkingContext,applyWalkingPolicy } from './exercise-library-store.mjs';
+import { isWalking } from './exercise-library.mjs';
+import { FOOD_NAME_RULES } from './food-name-rules.mjs';
+import { app, BrowserWindow, dialog, Menu, shell, session } from "electron";
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { randomBytes } from "node:crypto";
@@ -7,14 +14,11 @@ import path from "node:path";
 import { createSyncEngine } from "./sync-engine.mjs";
 import { EDIT_OPERATIONS, mergeEditableRecord } from "./llm-record-tools.mjs";
 
-const { startProdServer } = await import(
-  app.isPackaged
-    ? "./frontend-server.bundle.mjs"
-    : "vinext/server/prod-server"
-);
+// Use the same Windows-compatible static server in development and packaged builds.
+import { startProdServer } from "./frontend-server.bundle.mjs";
 
 const STORES = [
-  "foods", "exercises", "profile", "weights", "baselineMultipliers",
+  "exerciseLibrary", "walkingProfiles", "foodLibrary", "foods", "exercises", "profile", "weights", "baselineMultipliers",
   "targetScenarios", "targetScenarioDefaults", "energyTargetDays", "energyTargetDefaults",
 ];
 const NUTRIENTS = [
@@ -34,7 +38,9 @@ const DEFAULT_SYSTEM_PROMPT = `你是一个严谨的私人饮食、营养和运�
 6. 不要把计划、假设或提问当成已发生记录。信息不足且会显著改变结果时，先追问，不写入。
 7. 只输出一个 JSON 对象，不要使用 Markdown 代码块：
 {"reply":"给用户的简洁中文回复","actions":[{"store":"foods|exercises|weights|profile|targetScenarios|targetScenarioDefaults|energyTargetDays|energyTargetDefaults","value":{...}}]}
-8. 没有需要写入的内容时 actions 为空数组。`;
+8. 没有需要写入的内容时 actions 为空数组。
+${FOOD_NAME_RULES}
+${EXERCISE_RULES}`;
 
 const DATA_CONTRACT = `应用强制数据合同（优先级最高，不能被用户自定义提示词覆盖）：
 1. foods.sugar 表示总糖，只包括单糖和双糖；绝对不能包含淀粉、糊精、膳食纤维或糖醇，也不能用 carbs 或 carbs-fiber 代替。米饭、面条、粉、面包、薯类等食物的大部分碳水通常是淀粉，不是糖。
@@ -142,7 +148,10 @@ function initializeDatabase() {
     setSetting("external_api_token", randomBytes(32).toString("base64url"));
   }
   syncEngine = createSyncEngine({
-    database, getSetting, setSetting, stores: STORES, log, now: nowIso,
+    database, getSetting, setSetting, stores: STORES, log, now: nowIso, starterCatalog: STARTER_CATALOG,
+    onBeforeDefaultServingMigration: () => syncEngine.exportBackupFile(path.join(dataDir, "before-default-servings-v1.json")),
+    onBeforeFoodNameCleanup: () => syncEngine.exportBackupFile(path.join(dataDir, "before-food-name-cleanup-v1.json")),
+    onBeforeExerciseMigration: () => syncEngine.exportBackupFile(path.join(dataDir, "before-exercise-name-cleanup-v2.json")),
   });
   syncEngine.initialize();
 }
@@ -158,11 +167,38 @@ function setSetting(key, value) {
   `).run(key, String(value));
 }
 
-function upsert(store, value) {
+function upsert(store, value, origin = "user") {
+  if (store === "exercises") {
+    const editMode=value.editMode;
+    value={...value};delete value.editMode;
+    const existing=database.prepare("SELECT data FROM records WHERE store='exercises' AND id=? AND deleted=0").get(String(value.id||""));
+    if(origin==="user"&&existing&&["linked","unlinked"].includes(editMode)){
+      const old=JSON.parse(existing.data);
+      const walking=old.kind==="walking"||old.name==="步行";
+      const amount=Number(walking?value.steps:value.duration),before=Number(walking?old.steps:old.duration);
+      if(!Number.isFinite(amount)||amount<=0||(walking&&!Number.isInteger(amount)))throw Error("请输入有效的步数或时长");
+
+      if(!Number.isFinite(Number(value.calories))||Number(value.calories)<0)throw Error("耗能必须是有效非负数");
+      if(walking){value={...value,kind:"walking",walkingRate:Number(value.calories)*1000/amount,caloriesPer1000:Number(value.calories)*1000/amount,walkingMode:"record-edit"};}
+      else if(before<=0||Math.abs(Number(value.calories)/amount-Number(old.calories)/before)>1e-8)delete value.libraryId;
+      syncEngine.localUpsert(store,value);
+      return;
+    }
+    const result = applyWalkingPolicy(database, value, { allowSeed: origin === "llm" });
+    syncEngine.batchLocalChanges(() => {
+      if (result.seed) syncEngine.localUpsert("walkingProfiles", result.seed);
+      syncEngine.localUpsert(store, result.record);
+    });
+    return;
+  }
+  if (["exerciseLibrary","walkingProfiles"].includes(store)) value = { ...value, updatedAt: nowIso() };
+  if (store === "foodLibrary") value = { ...value, updatedAt: nowIso(), ...(value.defaultServingGrams!==undefined?{servingUpdatedAt:nowIso(),servingSource:"manual",servingBasis:"手动设置"}:{}) };
   syncEngine.localUpsert(store, value);
 }
 
 function allData() {
+  syncEngine.reconcileFoodLibrary();
+  syncEngine.reconcileExerciseLibrary();
   const result = Object.fromEntries(STORES.map((store) => [store, []]));
   for (const row of database.prepare(
     "SELECT store, data FROM records WHERE deleted = 0 ORDER BY updated_at"
@@ -188,7 +224,7 @@ function mergeExistingAction(action) {
       value.id = "me";
     }
   } else if ((store === "foods" || store === "exercises") && EDIT_OPERATIONS.has(operation)) {
-    const records = allData()[store];
+    const records = database.prepare("SELECT data FROM records WHERE store=? AND deleted=0").all(store).map(row=>JSON.parse(row.data));
     value.id = mergeEditableRecord(records, value, store).id;
     existing = records.find((item) => String(item.id) === String(value.id));
   } else if (STORES.includes(store) && recordId) {
@@ -214,23 +250,25 @@ function normalizeAction(action, selectedDate = "") {
     value.sugar ??= value.totalSugar ?? value.total_sugar ?? 0;
     value.sucrose ??= value["蔗糖"] ?? 0;
     value.addedSugar ??= value.added_sugar ?? value["添加糖"] ?? 0;
-    for (const key of NUTRIENTS) value[key] = Number(value[key] || 0) || 0;
+    for (const key of NUTRIENTS) { value[key]=numericValue(value[key]??0); if(!Number.isFinite(value[key])||value[key]<0)throw Error("营养数值必须为有效非负数字："+key); }
     value.sugar = Math.max(value.sugar, value.sucrose, value.addedSugar);
     value.carbs = Math.max(value.carbs, value.sugar);
     value.sucrose = Math.min(value.sucrose, value.sugar);
     value.addedSugar = Math.min(value.addedSugar, value.sugar);
-    value.date ||= todayIso();
+    value.date ||= selectedDate || todayIso();
     value.time ||= "12:00";
     value.meal ||= "未注明";
     value.name ||= "未命名食物";
-    value.weight = Number(value.weight || 0) || 0;
+    value.weight = numericValue(value.weight);
+    if(!Number.isFinite(value.weight)||value.weight<=0)throw Error("食品需要有效的可食克重");
     value.note ||= "由 LLM 录入";
   }
   if (store === "exercises") {
     const metrics = value.metrics && typeof value.metrics === "object" ? value.metrics : {};
     value.steps ??= value.stepCount ?? value.step_count ?? value.step ?? value["步数"] ?? metrics.steps ?? 0;
-    for (const key of ["calories", "duration", "steps"]) value[key] = Number(value[key] || 0) || 0;
-    value.date ||= todayIso();
+    value.duration=durationMinutes(value.duration??value.durationMinutes??(value.hours!=null?String(value.hours)+"小时":0));
+    for(const key of ["calories","steps"])value[key]=numericValue(value[key]??0);
+    value.date ||= selectedDate || todayIso();
     value.time ||= "20:00";
     value.name ||= "运动";
     value.intensity ||= "中等强度";
@@ -238,7 +276,7 @@ function normalizeAction(action, selectedDate = "") {
     value.note ||= "由 LLM 录入";
   }
   if (store === "baselineMultipliers") {
-    value.date ||= todayIso();
+    value.date ||= selectedDate || todayIso();
     value.id = String(value.date);
     value.multiplier = Math.max(0.7, Math.min(2, Number(value.multiplier || 1.2)));
     value.recordedAt ||= nowIso();
@@ -275,6 +313,7 @@ function normalizeAction(action, selectedDate = "") {
 }
 
 function reconcileExercise(value, latestWeight) {
+  if (isWalking(value)) return;
   const source = String(value.source || "").toLowerCase();
   if (!source.includes("estimated") && !source.includes("估算")) return;
   const match = String(value.note || "").match(/\bMET[^0-9]{0,6}([0-9]+(?:\.[0-9]+)?)/i);
@@ -297,18 +336,23 @@ function parseModelJson(content) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-async function llmCompletion(messages, enableSearch, temperature = 0.2) {
+const requestModel=createModelTransport(session);
+function modelConnection(){return {proxyMode:getSetting("llm_proxy_mode","auto"),proxyUrl:getSetting("llm_proxy_url",""),headerPreset:getSetting("llm_header_preset","auto"),customHeaders:getSetting("llm_custom_headers","{}")};}
+function conversationId(kind){const key="llm_session_"+kind;let id=getSetting(key);if(!id){id=randomBytes(24).toString("hex");setSetting(key,id);}return id;}
+async function llmCompletion(messages, enableSearch, temperature = 0.2, conversation = "chat") {
   const baseUrl = getSetting("llm_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1").replace(/\/+$/, "");
   const apiKey = getSetting("llm_api_key");
   const model = getSetting("llm_model", "qwen-plus");
   if (!apiKey) throw new Error("请先配置 LLM API Key");
-  const response = await fetch(`${baseUrl}/chat/completions`, {
+  const url=completionUrl(baseUrl),connection=modelConnection();
+  const response = await requestModel(url, {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, temperature, enable_search: enableSearch }),
+    headers: modelHeaders({url,apiKey,preset:connection.headerPreset,customHeaders:connection.customHeaders,sessionId:conversationId(conversation),version:app.getVersion()}),
+    body: JSON.stringify({model,messages,temperature,...(/(^|\.)aliyuncs\.com$/.test(new URL(url).hostname)?{enable_search:enableSearch}:{})}),
     signal: AbortSignal.timeout(90000),
-  });
+  },connection);
   const rawText = await response.text();
+  if (!response.ok && response.status>=500 && /ConnectFailed|ConnectionRefused|127\.0\.0\.1:7890/.test(rawText)) throw new Error("模型接口或转发服务返回 "+response.status+"：上游服务自身连接代理失败；本机代理设置无法修复远端代理。请检查转发服务的代理设置。"+rawText.slice(0,180));
   if (!response.ok) throw new Error(`模型接口返回 ${response.status}：${rawText.slice(0, 300)}`);
   const raw = JSON.parse(rawText);
   return String(raw.choices?.[0]?.message?.content || "").trim();
@@ -328,10 +372,14 @@ async function callLlm(userMessage, selectedDate = "") {
     .sort((a, b) => `${a.date || ""} ${a.time || ""}`.localeCompare(`${b.date || ""} ${b.time || ""}`))
     .slice(-50);
   const content = await llmCompletion([
-    { role: "system", content: `${getSetting("llm_system_prompt", DEFAULT_SYSTEM_PROMPT)}\n\n${DATA_CONTRACT}` },
+    { role: "system", content: `${getSetting("llm_system_prompt", DEFAULT_SYSTEM_PROMPT)}\n\n${DATA_CONTRACT}\n\n${FOOD_NAME_RULES}\n\n${EXERCISE_RULES}\n\n${BATCH_RECORD_RULES}` },
     { role: "system", content: `本机用户上下文：${JSON.stringify({
       currentDate: todayIso(), currentViewDate: selectedDate,
       profile: data.profile[0] || {}, latestWeight, editableFoodRecords, editableExerciseRecords,
+      walkingContext: getWalkingContext(database, selectedDate || todayIso()),
+      walkingContextsByDate: Object.fromEntries([...new Set([selectedDate || todayIso(), ...data.exercises.slice(-30).map(x => x.date)])].map(date => [date, getWalkingContext(database, date)])),
+      exerciseLibrary: data.exerciseLibrary,
+      foodLibrary: data.foodLibrary,
       currentViewScenario: scenarioForDate(selectedDate || todayIso(), data.targetScenarios, data.targetScenarioDefaults),
       targetScenarios: data.targetScenarios.slice(-60),
       targetScenarioDefaults: data.targetScenarioDefaults.slice(-30),
@@ -343,17 +391,31 @@ async function callLlm(userMessage, selectedDate = "") {
     { role: "user", content: userMessage },
   ], getSetting("llm_enable_search", "true") === "true");
   const modelResult = parseModelJson(content);
-  if (!Array.isArray(modelResult.actions)) throw new Error("模型返回的 actions 不是数组");
-  const normalized = modelResult.actions.map(mergeExistingAction).map((action) => normalizeAction(action, selectedDate));
-  for (const action of normalized) {
-    if (action.store === "exercises") reconcileExercise(action.value, latestWeight);
-    upsert(action.store, action.value);
-  }
-  const reply = String(modelResult.reply || `已处理 ${normalized.length} 条记录`);
-  const insert = database.prepare("INSERT INTO chat_messages (role, content, created_at) VALUES (?, ?, ?)");
-  insert.run("user", userMessage, nowIso());
-  insert.run("assistant", reply, nowIso());
-  return { reply, actions: normalized };
+  const rawActions=expandRecordActions(modelResult);
+  if(rawActions.some(action=>["exerciseLibrary","walkingProfiles","foodLibrary"].includes(action.store)))throw Error("模型不能直接修改食品库、运动库或步行设置");
+  rawActions.sort((a,b)=>Number(!["profile","weights"].includes(a.store))-Number(!["profile","weights"].includes(b.store)));
+  const normalized=[];
+  const reply=String(modelResult.reply||"记录已处理");
+  syncEngine.batchLocalChanges(()=>{
+    for(let index=0;index<rawActions.length;index++){
+      try{
+        const raw=structuredClone(rawActions[index]);
+        if(["foods","exercises"].includes(raw.store)&&!EDIT_OPERATIONS.has(String(raw.operation||"").toLowerCase()))delete raw.value.id;
+        const action=normalizeAction(mergeExistingAction(raw),selectedDate);
+        if(action.store==="exercises"){
+          const weight=database.prepare("SELECT data FROM records WHERE store='weights' AND deleted=0").all().map(row=>JSON.parse(row.data)).sort((a,b)=>a.date.localeCompare(b.date)).at(-1);
+          reconcileExercise(action.value,weight);
+        }
+        upsert(action.store,action.value,"llm");
+        const saved=database.prepare("SELECT data FROM records WHERE store=? AND id=?").get(action.store,action.value.id);
+        normalized.push({...action,value:JSON.parse(saved.data)});
+      }catch(error){throw Error("第"+(index+1)+"条记录无法保存："+error.message+"；本批次没有写入任何记录");}
+    }
+    const insert=database.prepare("INSERT INTO chat_messages(role,content,created_at) VALUES(?,?,?)");
+    insert.run("user",userMessage,nowIso());insert.run("assistant",reply,nowIso());
+  });
+  return {reply,actions:normalized};
+
 }
 
 function buildAnalysisContext(rangeDays) {
@@ -420,7 +482,7 @@ async function analyzeHistory(question, rangeDays) {
     { role: "system", content: `历史数据（JSON）：${JSON.stringify(buildAnalysisContext(rangeDays))}` },
     ...history,
     { role: "user", content: question },
-  ], false, 0.15);
+  ], false, 0.15, "analysis-"+rangeDays);
   const insert = database.prepare(
     "INSERT INTO analysis_messages (role, content, range_days, created_at) VALUES (?, ?, ?, ?)"
   );
@@ -477,8 +539,10 @@ function startApi() {
       if (!external && origin !== uiOrigin) return sendJson(response, 403, { error: "Origin not allowed" }, origin);
 
       if (request.method === "GET") {
+        if (route === "/api/directory/preferences") return sendJson(response, 200, JSON.parse(getSetting("directoryPreferences", "{}")), origin);
         if (route === "/api/data") return sendJson(response, 200, allData(), origin);
         if (route === "/api/llm/config") return sendJson(response, 200, {
+          ...modelConnection(),
           baseUrl: getSetting("llm_base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
           model: getSetting("llm_model", "qwen-plus"),
           systemPrompt: getSetting("llm_system_prompt", DEFAULT_SYSTEM_PROMPT),
@@ -510,7 +574,13 @@ function startApi() {
 
       if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed" }, origin);
       const body = await readBody(request);
-      if (route === "/api/put") upsert(String(body.store || ""), body.value);
+      if (route === "/api/directory/preferences") {
+        if (!/^(food-directory-v1|exercise-directory-v1-(male|female|unspecified))$/.test(body.key || "")) throw new Error("Invalid preference key");
+        const preferences = JSON.parse(getSetting("directoryPreferences", "{}"));
+        preferences[body.key] = { sort: body.sort === "recent" ? "recent" : "alphabet", pins: [...new Set((Array.isArray(body.pins) ? body.pins : []).filter(id => typeof id === "string" && id.length < 2000))].slice(0,5) };
+        setSetting("directoryPreferences", JSON.stringify(preferences));
+      }
+      else if (route === "/api/put") upsert(String(body.store || ""), body.value);
       else if (route === "/api/delete") {
         if (!STORES.includes(String(body.store || "")) || !body.id) throw new Error("Invalid record");
         syncEngine.localDelete(String(body.store), String(body.id));
@@ -523,11 +593,17 @@ function startApi() {
               const action = (store === "foods" || store === "exercises")
                 ? normalizeAction({ store, value })
                 : { store, value };
-              upsert(action.store, action.value);
+              syncEngine.localUpsert(action.store, action.value);
             }
           }
         }
       } else if (route === "/api/llm/config") {
+        const connection=validateConnection({...modelConnection(),...body});
+        completionUrl(body.baseUrl||"");
+        setSetting("llm_proxy_mode",connection.proxyMode);
+        setSetting("llm_proxy_url",connection.proxyUrl);
+        setSetting("llm_header_preset",connection.headerPreset);
+        setSetting("llm_custom_headers",connection.customHeaders);
         setSetting("llm_base_url", body.baseUrl || "");
         setSetting("llm_model", body.model || "qwen-plus");
         setSetting("llm_system_prompt", body.systemPrompt || DEFAULT_SYSTEM_PROMPT);
@@ -545,8 +621,8 @@ function startApi() {
         return sendJson(response, 200, {
           reply: await analyzeHistory(question, rangeDays), rangeDays, readOnly: true,
         }, origin);
-      } else if (route === "/api/chat/clear") database.exec("DELETE FROM chat_messages");
-      else if (route === "/api/analysis/clear") database.exec("DELETE FROM analysis_messages");
+      } else if (route === "/api/chat/clear") {database.exec("DELETE FROM chat_messages");setSetting("llm_session_chat","");}
+      else if (route === "/api/analysis/clear") {database.exec("DELETE FROM analysis_messages");for(const days of [0,7,30,90])setSetting("llm_session_analysis-"+days,"");}
       else if (route === "/api/sync/config") {
         return sendJson(response, 200, syncEngine.configure({
           syncFolder: body.folder,

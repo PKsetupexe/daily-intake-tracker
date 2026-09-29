@@ -1,0 +1,15 @@
+import {app,session} from 'electron';import {createServer,request} from 'node:http';import {mkdirSync,writeFileSync} from 'node:fs';import path from 'node:path';import {createModelTransport,modelHeaders} from '../electron/model-network.mjs';
+async function main(){const out=path.resolve('installer/smoke-profile-network');mkdirSync(out,{recursive:true});app.setPath('userData',path.join(out,'run-'+Date.now()));await app.whenReady();const results=[];let hits=0,lastHeaders,proxyHits=0,systemMode={mode:'direct'};const server=createServer(async(req,res)=>{hits++;lastHeaders=req.headers;for await(const c of req){}res.end('ok')});await new Promise(r=>server.listen(0,'127.0.0.1',r));const proxy=createServer((req,res)=>{proxyHits++;const upstream=request(req.url,{method:req.method,headers:req.headers},reply=>{res.writeHead(reply.statusCode,reply.headers);reply.pipe(res)});upstream.on('error',()=>{res.writeHead(502);res.end()});req.pipe(upstream)});await new Promise(r=>proxy.listen(0,'127.0.0.1',r));const url='http://127.0.0.1:'+server.address().port+'/v1/chat/completions';let seq=0;
+const wrapper={fromPartition:()=>{const real=session.fromPartition('network-test-'+seq++);return {setProxy:c=>real.setProxy(c.mode==='system'?systemMode:c),forceReloadProxyConfig:()=>real.forceReloadProxyConfig(),resolveProxy:u=>real.resolveProxy(u),fetch:(...args)=>real.fetch(...args)}}};
+const check=(v,s)=>{if(!v)throw Error(s);results.push(s)};
+const send=async(config)=>{const response=await createModelTransport(wrapper)(url,{method:'POST',headers:modelHeaders({url,apiKey:'test',preset:'opencode',sessionId:'stable-test',version:'3.6.0',customHeaders:'{"X-Example":"hello"}'}),body:'{}',signal:AbortSignal.timeout(6000)},config);return response.text()};
+try{process.env.HTTPS_PROXY='http://127.0.0.1:1';process.env.HTTP_PROXY=process.env.HTTPS_PROXY;
+check(await send({proxyMode:'auto'})==='ok','system proxy off: direct despite stale environment');
+systemMode={mode:'fixed_servers',proxyRules:'http://127.0.0.1:1',proxyBypassRules:'<-loopback>'};
+check(await send({proxyMode:'auto'})==='ok','dead system proxy: automatic direct fallback');
+systemMode={mode:'fixed_servers',proxyRules:'http://127.0.0.1:'+proxy.address().port,proxyBypassRules:'<-loopback>'};
+check(await send({proxyMode:'auto'})==='ok'&&proxyHits>0,'active system proxy: routed through proxy');
+const before=proxyHits;check(await send({proxyMode:'direct'})==='ok'&&proxyHits===before,'forced direct ignores active proxy');
+check(await send({proxyMode:'custom',proxyUrl:'http://127.0.0.1:'+proxy.address().port})==='ok'&&proxyHits>before,'custom proxy works');
+check(lastHeaders['x-opencode-session']==='stable-test'&&lastHeaders['x-example']==='hello'&&lastHeaders['user-agent']==='daily-intake-desktop/3.6.0','real requests contain session, custom header and own user agent');
+writeFileSync(path.join(out,'result.json'),JSON.stringify({passed:true,results},null,2));app.exit(0);}catch(e){writeFileSync(path.join(out,'result.json'),JSON.stringify({error:e.stack,results},null,2));app.exit(1)}}main();

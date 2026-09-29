@@ -1,3 +1,5 @@
+import {STARTER_CATALOG} from '../electron/starter-catalog.mjs';
+import {normalizeExerciseRecord,exerciseLibraryId} from '../electron/exercise-library.mjs';
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import os from "node:os";
@@ -7,7 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createSyncEngine } from "../electron/sync-engine.mjs";
 
 const STORES = [
-  "foods", "exercises", "profile", "weights", "baselineMultipliers",
+  "exerciseLibrary", "walkingProfiles", "foodLibrary", "foods", "exercises", "profile", "weights", "baselineMultipliers",
   "targetScenarios", "targetScenarioDefaults", "energyTargetDays", "energyTargetDefaults",
 ];
 
@@ -33,6 +35,7 @@ function testDevice(root, name, options = {}) {
     stores: STORES,
     now: options.now,
     retention: options.retention,
+    starterCatalog: options.starterCatalog,
   });
   engine.initialize();
   return { database, engine };
@@ -255,10 +258,10 @@ test("local backup export is current and import merges without clearing newer or
   });
   const backupFile = path.join(root, "manual-backup.json");
   const exported = source.engine.exportBackupFile(backupFile);
-  assert.equal(exported.records, 2);
+  assert.equal(exported.records, 3);
   const backup = JSON.parse(readFileSync(backupFile, "utf8"));
   assert.equal(backup.version, 5);
-  assert.equal(backup.records.length, 2);
+  assert.equal(backup.records.length, 3);
   assert.doesNotMatch(JSON.stringify(backup), /api[_ -]?key|llm_api_key/i);
 
   let targetClock = "2026-07-03T08:00:00.000Z";
@@ -270,7 +273,7 @@ test("local backup export is current and import merges without clearing newer or
     id: "local-only", date: "2026-07-03", name: "本机独有记录", calories: 180,
   });
   const imported = target.engine.importBackupFile(backupFile);
-  assert.equal(imported.imported, 1);
+  assert.equal(imported.imported, 2);
   assert.equal(imported.skipped, 1);
   assert.equal(active(target, "foods").find((item) => item.id === "shared-food").name, "本机较新版本");
   assert.equal(active(target, "foods").find((item) => item.id === "local-only").calories, 180);
@@ -278,4 +281,150 @@ test("local backup export is current and import merges without clearing newer or
 
   source.database.close();
   target.database.close();
+});
+
+test('food library migration is idempotent and deletion and edits survive snapshots', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'food-library-sync-'));
+  const a = testDevice(root, 'a');
+  a.database.prepare("INSERT INTO records (store,id,data,updated_at) VALUES ('foods',?,?,?)").run('old', JSON.stringify({id:'old',name:'米饭',weight:350,calories:420,protein:10.5,date:'2020-01-01',time:'12:00'}), '2020-01-02T00:00:00.000Z');
+  a.engine.initialize();
+  let food = active(a,'foodLibrary')[0];
+  assert.equal(food.calories,120); assert.equal(food.protein,3);
+  assert.equal(food.createdAt,'2020-01-01T04:00:00.000Z');
+  const count = a.database.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n;
+  a.engine.initialize(); a.engine.reconcileFoodLibrary();
+  assert.equal(a.database.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n,count);
+  a.engine.localUpsert('foodLibrary',{...food, name:'熟米饭', protein:4});
+  a.engine.reconcileFoodLibrary(); assert.equal(active(a,'foodLibrary').length,1);
+  const syncFolder = path.join(root,'OneDrive');
+  a.engine.configure({syncFolder,syncEnabled:true});
+  const b = testDevice(root,'b'); b.engine.configure({syncFolder,syncEnabled:true});
+  assert.equal(active(b,'foodLibrary')[0].protein,4);
+  assert.equal(active(b,'foodLibrary')[0].createdAt,food.createdAt);
+  b.engine.localDelete('foodLibrary',food.id); b.engine.exportFullToCloud();
+  a.engine.runSync(); a.engine.initialize();
+  assert.equal(active(a,'foodLibrary').length,0);
+  const c = testDevice(root,'c');c.engine.configure({syncFolder,syncEnabled:true});c.engine.initialize();
+  assert.equal(active(c,'foodLibrary').length,0); assert.equal(active(c,'foods').length,1);
+  a.engine.localUpsert('foods',{id:'invalid',name:'未知克重',weight:0,calories:10});
+  assert.equal(active(a,'foodLibrary').length,0);
+  a.database.close();b.database.close();c.database.close();
+});
+
+test('name cleanup is atomic, repeatable, and propagates canonical foods across devices', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'food-name-cleanup-'));
+  const a = testDevice(root, 'a');
+  const insert = a.database.prepare('INSERT INTO records(store,id,data,updated_at) VALUES (?,?,?,?)');
+  for (const [id, weight] of [['rice300',300],['rice360',360]]) {
+    insert.run('foods',id,JSON.stringify({id,name:`白米饭 (${weight}g)`,weight,calories:weight*1.2,protein:weight*.03,note:'原备注'}),'2026-08-01T00:00:00Z');
+    insert.run('foodLibrary',`alias-${id}`,JSON.stringify({id:`alias-${id}`,name:`白米饭 (${weight}g)`,weight:100,calories:120,protein:3,note:'原备注',createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-08-01T00:00:00Z'}),'2026-08-01T00:00:00Z');
+  }
+  a.engine.reconcileFoodLibrary();
+  assert.equal(active(a,'foodLibrary').length,1);assert.equal(active(a,'foodLibrary')[0].name,'白米饭');
+  const diets=active(a,'foods');assert.deepEqual(diets.map(x=>x.weight),[300,360]);assert.ok(diets.every(x=>x.note.includes('原备注')&&x.name==='白米饭'));
+  const eventCount=a.database.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n;
+  a.engine.reconcileFoodLibrary();assert.equal(a.database.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n,eventCount);
+  assert.throws(()=>a.engine.batchLocalChanges(()=>{a.engine.localUpsert('foods',{id:'rollback',name:'脆桃 (2个, 约280g)',weight:280,calories:100});throw Error('rollback');}));
+  assert.equal(active(a,'foods').length,2);assert.equal(a.database.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n,eventCount);
+  const syncFolder=path.join(root,'OneDrive');a.engine.configure({syncFolder,syncEnabled:true});a.engine.exportFullToCloud();
+  const b=testDevice(root,'b');b.engine.configure({syncFolder,syncEnabled:true});
+  assert.deepEqual(active(b,'foodLibrary'),active(a,'foodLibrary'));assert.deepEqual(active(b,'foods'),active(a,'foods'));
+  b.engine.localUpsert('foods',{id:'new',name:'白米饭（200g）',weight:200,calories:240,note:'新备注'});b.engine.runSync();a.engine.runSync();
+  assert.equal(active(a,'foodLibrary').length,1);assert.equal(active(a,'foods').find(x=>x.id==='new').name,'白米饭');
+  a.database.close();b.database.close();
+});
+
+test('walking auto follows weight, manual stays locked, and LLM seeds only empty manual mode', async () => {
+ const {applyWalkingPolicy,getWalkingContext}=await import('../electron/exercise-library-store.mjs');
+ const root=mkdtempSync(path.join(os.tmpdir(),'walking-policy-'));const device=testDevice(root,'device');const {engine,database}=device;
+ engine.localUpsert('profile',{id:'me',sex:'male'});engine.localUpsert('weights',{id:'2020-01-01',date:'2020-01-01',weight:70});
+ assert.equal(getWalkingContext(database).caloriesPer1000,24.5);
+ const value={id:'walk',name:'步行',date:'2026-01-01',steps:2000,calories:999,duration:20};
+ assert.equal(applyWalkingPolicy(database,value,{allowSeed:true}).record.calories,49);
+ engine.localUpsert('weights',{id:'2020-01-02',date:'2020-01-02',weight:80});assert.equal(getWalkingContext(database).caloriesPer1000,28);
+ engine.localUpsert('walkingProfiles',{id:'walking:male',sex:'male',mode:'manual',manualCaloriesPer1000:33});
+ const locked=JSON.stringify(active(device,'walkingProfiles').find(x=>x.sex==='male'));
+ engine.localUpsert('weights',{id:'2020-01-03',date:'2020-01-03',weight:90});
+ assert.equal(JSON.stringify(active(device,'walkingProfiles').find(x=>x.sex==='male')),locked);
+ assert.equal(applyWalkingPolicy(database,value,{allowSeed:true}).record.calories,66);
+ engine.localUpsert('walkingProfiles',{id:'walking:male',sex:'male',mode:'manual',manualCaloriesPer1000:null});
+ assert.throws(()=>applyWalkingPolicy(database,value));
+ const first=applyWalkingPolicy(database,{...value,calories:60},{allowSeed:true});assert.equal(first.seed.manualCaloriesPer1000,30);
+ engine.batchLocalChanges(()=>{engine.localUpsert('walkingProfiles',first.seed);engine.localUpsert('exercises',first.record);});
+ const later=applyWalkingPolicy(database,{...value,calories:999},{allowSeed:true});assert.equal(later.seed,null);assert.equal(later.record.calories,60);
+ assert.throws(()=>applyWalkingPolicy(database,{...value,steps:0},{allowSeed:true}));
+ database.close();
+});
+test('exercise library migration keeps history and syncs manual walking state and deletion',()=>{
+ const root=mkdtempSync(path.join(os.tmpdir(),'exercise-library-'));const a=testDevice(root,'a');
+ a.engine.localUpsert('profile',{id:'me',sex:'female'});
+ for(const [id,name,calories] of [['slow','8分配跑步10分钟',80],['fast','5分配跑步10分钟',130]])a.engine.localUpsert('exercises',{id,name,date:'2026-01-01',duration:10,calories,steps:1500,intensity:'高强度'});
+ assert.equal(active(a,'exerciseLibrary').length,2);assert.equal(active(a,'exercises').find(x=>x.id==='slow').calories,80);assert.ok(active(a,'exerciseLibrary').every(x=>x.sex==='female'));
+ const count=a.database.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n;a.engine.reconcileExerciseLibrary();assert.equal(a.database.prepare('SELECT COUNT(*) AS n FROM sync_outbox').get().n,count);
+ a.engine.localUpsert('walkingProfiles',{id:'walking:female',sex:'female',mode:'manual',manualCaloriesPer1000:25});
+ const folder=path.join(root,'OneDrive');a.engine.configure({syncFolder:folder,syncEnabled:true});a.engine.exportFullToCloud();
+ const b=testDevice(root,'b');b.engine.configure({syncFolder:folder,syncEnabled:true});assert.deepEqual(active(b,'exerciseLibrary'),active(a,'exerciseLibrary'));
+ assert.equal(active(b,'walkingProfiles').find(x=>x.sex==='female').manualCaloriesPer1000,25);
+ const id=active(b,'exerciseLibrary')[0].id;b.engine.localDelete('exerciseLibrary',id);b.engine.runSync();a.engine.runSync();a.engine.reconcileExerciseLibrary();assert.equal(active(a,'exerciseLibrary').length,1);
+ a.database.close();b.database.close();
+});
+
+test('starter catalog is repeatable and never overrides user edits or tombstones on fresh devices',()=>{
+ const root=mkdtempSync(path.join(os.tmpdir(),'catalog-sync-'));
+ const a=testDevice(root,'a',{starterCatalog:STARTER_CATALOG});
+ assert.equal(active(a,'foodLibrary').length,29);assert.equal(active(a,'exerciseLibrary').length,56);
+ for(const item of active(a,'exerciseLibrary'))assert.equal(normalizeExerciseRecord(item).name,item.name);
+ const food=active(a,'foodLibrary')[0],exercise=active(a,'exerciseLibrary')[0];
+ const burger=active(a,'foodLibrary').find(x=>x.name.includes('麦当劳'));assert.ok(burger.note.includes('1个=155g'));
+ a.engine.localUpsert('foodLibrary',{...food,calories:999});a.engine.localDelete('exerciseLibrary',exercise.id);
+ const count=a.database.prepare('SELECT COUNT(*) n FROM sync_outbox').get().n;a.engine.initialize();assert.equal(a.database.prepare('SELECT COUNT(*) n FROM sync_outbox').get().n,count);
+ const syncFolder=path.join(root,'OneDrive');a.engine.configure({syncFolder,syncEnabled:true});a.engine.runSync();
+ const b=testDevice(root,'b',{starterCatalog:STARTER_CATALOG});b.engine.configure({syncFolder,syncEnabled:true});b.engine.runSync();a.engine.runSync();
+ assert.equal(active(b,'foodLibrary').find(x=>x.id===food.id).calories,999);assert.ok(!active(b,'exerciseLibrary').some(x=>x.id===exercise.id));
+ b.engine.initialize();assert.ok(!active(b,'exerciseLibrary').some(x=>x.id===exercise.id));
+});
+
+test('legacy activity aliases merge latest library values and preserve every historical total',()=>{
+ const root=mkdtempSync(path.join(os.tmpdir(),'exercise-cleanup-')),d=testDevice(root,'d');
+ const insert=d.database.prepare("INSERT INTO records(store,id,data,updated_at,deleted) VALUES(?,?,?,?,0)");
+ const names=['健身房力量训练 · 中等强度 · MET4','健身房力量训练 无氧 · 中等强度 · MET5','力量训练 · 较低强度 · MET3'];
+ for(let i=0;i<3;i++){
+  insert.run('exerciseLibrary',`old-${i}`,JSON.stringify({id:`old-${i}`,name:names[i],sex:'male',intensity:i===2?'较低强度':'中等强度',caloriesPer10Minutes:40+i*10,createdAt:`2026-01-0${i+1}`,updatedAt:`2026-02-0${i+1}`,note:`MET${4+i}`}),`2026-02-0${i+1}`);
+  insert.run('exercises',`history-${i}`,JSON.stringify({id:`history-${i}`,name:names[i],sex:'male',duration:30,calories:100+i,date:'2026-01-01',libraryId:`old-${i}`}),`2026-01-0${i+1}`);
+ }
+ d.engine.reconcileExerciseLibrary();const entries=active(d,'exerciseLibrary');assert.equal(entries.length,2);
+ const moderate=entries.find(x=>x.name==='力量训练 · 中等强度');assert.equal(moderate.caloriesPer10Minutes,50);assert.equal(moderate.createdAt,'2026-01-01');assert.ok(moderate.note.includes('代谢当量4'));
+ for(let i=0;i<3;i++){const row=active(d,'exercises').find(x=>x.id===`history-${i}`);assert.equal(row.calories,100+i);assert.equal(row.duration,30);assert.ok(entries.some(x=>x.id===row.libraryId));}
+ const count=d.database.prepare('SELECT COUNT(*) n FROM sync_outbox').get().n;d.engine.reconcileExerciseLibrary();assert.equal(d.database.prepare('SELECT COUNT(*) n FROM sync_outbox').get().n,count);
+});
+
+test('legacy preset portion migration remains older than remote user edits',()=>{
+ const root=mkdtempSync(path.join(os.tmpdir(),'serving-migration-sync-'));
+ const oldCatalog=STARTER_CATALOG.map(item=>{const value={...item.value};for(const key of ['defaultServingGrams','servingSource','servingBasis','servingUpdatedAt'])delete value[key];return {...item,value};});
+ const a=testDevice(root,'old',{starterCatalog:oldCatalog}),b=testDevice(root,'new',{starterCatalog:STARTER_CATALOG});
+ const food=active(b,'foodLibrary')[0];b.engine.localUpsert('foodLibrary',{...food,defaultServingGrams:321,servingSource:'manual',servingUpdatedAt:new Date().toISOString()});
+ const syncFolder=path.join(root,'cloud');b.engine.configure({syncFolder,syncEnabled:true});a.engine.configure({syncFolder,syncEnabled:true});a.engine.runSync();
+ assert.equal(active(a,'foodLibrary').find(x=>x.id===food.id).defaultServingGrams,321);
+ const other=active(a,'foodLibrary').find(x=>x.id!==food.id);assert.ok(other.defaultServingGrams>0);
+});
+
+test("food edits update normalized nutrition atomically, proportional weights preserve library corrections, and renames retain shared history",()=>{
+ const root=mkdtempSync(path.join(os.tmpdir(),"food-edit-")),a=testDevice(root,"a");
+ let food={id:"meal",name:"测试食品",date:"2026-09-17",time:"12:00",weight:100,carbs:20,calories:100};
+ a.engine.localUpsert("foods",food);
+ let lib=active(a,"foodLibrary")[0];a.engine.localUpsert("foodLibrary",{...lib,carbs:22});
+ food={...food,weight:50,carbs:10,calories:50};a.engine.localUpsert("foods",food);
+ assert.equal(active(a,"foodLibrary")[0].carbs,22);assert.equal(active(a,"foodLibrary")[0].defaultServingGrams,50);
+ food={...food,carbs:15};a.engine.localUpsert("foods",food);assert.equal(active(a,"foodLibrary")[0].carbs,30);
+ a.engine.localUpsert("foods",{...food,id:"other"});
+ food={...food,name:"修改后的食品"};a.engine.localUpsert("foods",food);
+ assert.deepEqual(active(a,"foodLibrary").map(x=>x.name).sort(),["修改后的食品","测试食品"].sort());
+ a.engine.localUpsert("foods",{...food,name:"再次改名"});
+ assert.ok(!active(a,"foodLibrary").some(x=>x.name==="修改后的食品"));
+ const snapshot=JSON.stringify(active(a,"foods")),libs=JSON.stringify(active(a,"foodLibrary"));
+ assert.throws(()=>a.engine.batchLocalChanges(()=>{a.engine.localUpsert("foods",{...food,carbs:99});throw Error("abort");}));
+ assert.equal(JSON.stringify(active(a,"foods")),snapshot);assert.equal(JSON.stringify(active(a,"foodLibrary")),libs);
+ const folder=path.join(root,"cloud");a.engine.configure({syncEnabled:true,syncFolder:folder});a.engine.runSync();
+ const b=testDevice(root,"b");b.engine.configure({syncEnabled:true,syncFolder:folder});b.engine.runSync();
+ assert.deepEqual(active(b,"foodLibrary"),active(a,"foodLibrary"));a.database.close();b.database.close();
 });

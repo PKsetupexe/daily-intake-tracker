@@ -21,6 +21,10 @@
 # misc
 .DS_Store
 *.pem
+*.key
+*.p12
+*.sqlite*
+api_token.txt
 
 # debug
 npm-debug.log*

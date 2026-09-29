@@ -1,3 +1,10 @@
+import {planDefaultServings} from './default-servings.mjs';
+import { planExerciseNameCleanup } from './exercise-name-cleanup.mjs';
+import { normalizeExerciseRecord } from './exercise-library.mjs';
+import { planExerciseMigration,prepareExerciseLibrary,prepareWalkingProfile } from './exercise-library-store.mjs';
+import { normalizeFoodRecord } from './food-name.mjs';
+import { planFoodNameCleanup } from './food-name-cleanup.mjs';
+import { backfillFoodLibrary, prepareLibraryWrite, planEditedFoodLibrary } from './food-library-store.mjs';
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -78,12 +85,21 @@ export function createSyncEngine({
   log = () => {},
   now = () => new Date().toISOString(),
   retention = {},
+  onBeforeFoodNameCleanup,
+  onBeforeExerciseMigration,
+  onBeforeDefaultServingMigration,
+  starterCatalog = [],
 }) {
+  let seeding = false;
+  let refreshingPreset = false;
   let timer;
   let running = false;
+  let batchDepth = 0;
+  let reconciling = false;
+  let reconcilingExercise = false;
   const retentionPolicy = { ...DEFAULT_RETENTION, ...retention };
 
-  function initialize() {
+  function initialize({ reconcile = true } = {}) {
     addColumn(database, "records", "deleted", "INTEGER NOT NULL DEFAULT 0");
     addColumn(database, "records", "sync_event_id", "TEXT NOT NULL DEFAULT ''");
     addColumn(database, "records", "sync_device", "TEXT NOT NULL DEFAULT ''");
@@ -105,6 +121,31 @@ export function createSyncEngine({
       );
     `);
     if (!getSetting("sync_device_id")) setSetting("sync_device_id", randomUUID());
+    if (stores.includes("foodLibrary")&&onBeforeDefaultServingMigration&&!getSetting("default_servings_backup_v1")){
+      const missing=database.prepare("SELECT data FROM records WHERE store='foodLibrary' AND deleted=0").all().some(row=>!(Number(JSON.parse(row.data).defaultServingGrams)>0));
+      if(missing){onBeforeDefaultServingMigration();setSetting("default_servings_backup_v1",now());}
+    }
+    if (stores.includes("foodLibrary")) {
+      if (!getSetting("food_library_schema_v1")) {
+        database.exec("DELETE FROM sync_snapshots_applied");
+        setSetting("food_library_schema_v1", "1");
+      }
+      if (reconcile) reconcileFoodLibrary();
+    }
+    if (stores.includes("exerciseLibrary") && !getSetting("exercise_library_schema_v1")) {
+      database.exec("DELETE FROM sync_snapshots_applied"); setSetting("exercise_library_schema_v1", "1");
+    }
+    if (reconcile) { reconcileExerciseLibrary(); seedStarterCatalog(); }
+  }
+
+  function seedStarterCatalog() {
+    if(!starterCatalog.length)return 0;
+    const known=new Set(database.prepare("SELECT store,id,data FROM records WHERE store IN ('foodLibrary','exerciseLibrary')").all().flatMap(row=>{
+      const value=JSON.parse(row.data);return [`${row.store}:${row.id}`,`${row.store}:${value.name}:${value.sex||''}`];
+    }));
+    const missing=starterCatalog.filter(({store,value})=>stores.includes(store)&&!known.has(`${store}:${value.id}`)&&!known.has(`${store}:${value.name}:${value.sex||''}`));
+    if(!missing.length)return 0;
+    return batchLocalChanges(()=>{seeding=true;try{for(const {store,value}of missing)localUpsert(store,value);}finally{seeding=false;}return missing.length;});
   }
 
   function detectedOneDriveRoot() {
@@ -222,8 +263,9 @@ export function createSyncEngine({
   }
 
   function enqueueEvent(operation, store, id, data, current) {
-    const eventId = randomUUID();
-    const requestedAt = now();
+    const eventId = refreshingPreset ? "preset-v2-"+createHash("sha256").update(store+":"+id).digest("hex") : seeding ? `preset-v1-${createHash("sha256").update(`${store}:${id}`).digest("hex")}` : randomUUID();
+    // Seed events precede all real user writes, including edits/deletions on another device.
+    const requestedAt = (seeding||refreshingPreset) ? "2000-01-01T00:00:00.000Z" : now();
     const requestedTime = Date.parse(requestedAt);
     const currentTime = Date.parse(current?.updated_at || "");
     const createdAt = Number.isFinite(currentTime) && (!Number.isFinite(requestedTime) || requestedTime <= currentTime)
@@ -245,7 +287,96 @@ export function createSyncEngine({
     return { event, payload: JSON.stringify(event) };
   }
 
-  function localUpsert(store, value) {
+  function batchLocalChanges(callback) {
+    if (batchDepth) return callback();
+    database.exec("BEGIN IMMEDIATE");
+    batchDepth = 1;
+    try {
+      const result = callback();
+      reconcileFoodLibrary();
+      reconcileExerciseLibrary();
+      database.exec("COMMIT");
+      batchDepth = 0;
+      if (enabled()) { try { flushOutbox(); } catch(error) { setSetting("sync_last_error",String(error.message||error)); } }
+      return result;
+    } catch (error) {
+      if (batchDepth) database.exec("ROLLBACK");
+      batchDepth = 0;
+      throw error;
+    }
+  }
+
+  function reconcileFoodLibrary() {
+    if (!stores.includes("foodLibrary") || reconciling) return 0;
+    reconciling = true;
+    try {
+      const rows = database.prepare("SELECT store,id,data,updated_at,deleted FROM records WHERE store IN ('foods','foodLibrary')").all();
+      const plan = planFoodNameCleanup(rows, now());
+      const changed = plan.foods.length + plan.puts.length + plan.deletes.length;
+      if (changed && onBeforeFoodNameCleanup && !getSetting("food_name_cleanup_backup_v1")) {
+        onBeforeFoodNameCleanup();
+        setSetting("food_name_cleanup_backup_v1", now());
+      }
+      return batchLocalChanges(() => {
+        for (const id of plan.deletes) localDelete("foodLibrary", id);
+        for (const value of plan.puts) localUpsert("foodLibrary", value);
+        for (const value of plan.foods) localUpsert("foods", value);
+        const filled=backfillFoodLibrary(database, localUpsert);
+        const servings=planDefaultServings(database);
+        for(const value of servings){
+          const existing=database.prepare("SELECT sync_event_id FROM records WHERE store='foodLibrary' AND id=?").get(value.id);
+          refreshingPreset=String(existing?.sync_event_id||"").startsWith("preset-")&&value.servingSource!=="history";
+          try{localUpsert("foodLibrary",value);}finally{refreshingPreset=false;}
+        }
+        return changed+filled+servings.length;
+      });
+    } finally { reconciling = false; }
+  }
+
+  function reconcileExerciseLibrary() {
+    if (!stores.includes("exerciseLibrary") || reconcilingExercise) return 0;
+    reconcilingExercise = true;
+    try {
+      const rows=database.prepare("SELECT store,id,data,updated_at,deleted FROM records WHERE store IN ('exercises','exerciseLibrary')").all();
+      const cleanup=planExerciseNameCleanup(rows,now());
+      const changed=cleanup.puts.length+cleanup.deletes.length+cleanup.updates.length;
+      const initial=planExerciseMigration(database,now());
+      if(!changed&&!initial.updates.length&&!initial.library.length&&!initial.walking.length)return 0;
+      if (onBeforeExerciseMigration && !getSetting("exercise_name_cleanup_backup_v2")) {
+        onBeforeExerciseMigration(); setSetting("exercise_name_cleanup_backup_v2", now());
+      }
+      return batchLocalChanges(() => {
+        for(const id of cleanup.deletes)localDelete('exerciseLibrary',id);
+        for(const value of cleanup.updates)localUpsert('exercises',value);
+        for(const value of cleanup.puts)localUpsert('exerciseLibrary',value);
+        const plan=planExerciseMigration(database,now());
+        for (const value of plan.updates) localUpsert("exercises", value);
+        for (const value of plan.library) localUpsert("exerciseLibrary", value);
+        for (const value of plan.walking) localUpsert("walkingProfiles", value);
+        return changed+plan.updates.length+plan.library.length+plan.walking.length;
+      });
+    } finally { reconcilingExercise = false; }
+  }
+
+  function localUpsert(store, value, options = {}) {
+    if (store === "foods" && value?.id && !options.foodHandled && !reconciling && stores.includes("foodLibrary")) {
+      return batchLocalChanges(() => {
+        const row=database.prepare("SELECT data FROM records WHERE store='foods' AND id=? AND deleted=0").get(String(value.id));
+        const normalized=normalizeFoodRecord(value);
+        const plan=planEditedFoodLibrary(database,row?JSON.parse(row.data):null,normalized,now());
+        localUpsert(store,normalized,{foodHandled:true});
+        for(const id of plan.deletes)localDelete("foodLibrary",id);
+        for(const food of plan.puts)localUpsert("foodLibrary",food);
+      });
+    }
+    if (store === "exercises" && value && typeof value === "object" && stores.includes("exerciseLibrary")) {
+      const profile = database.prepare("SELECT data FROM records WHERE store='profile' AND deleted=0 LIMIT 1").get();
+      value = normalizeExerciseRecord(value, profile ? JSON.parse(profile.data).sex : 'unspecified');
+    }
+    if (store === "exerciseLibrary") value = prepareExerciseLibrary(database, value, value.updatedAt || now());
+    if (store === "walkingProfiles") value = prepareWalkingProfile(database, value, now());
+    if (store === "foods" && value && typeof value === "object") value = normalizeFoodRecord(value);
+    if (store === "foodLibrary") value = prepareLibraryWrite(database, value, value.updatedAt || now());
     if (!stores.includes(store) || !value || typeof value !== "object" || !value.id) {
       throw new Error("Invalid record");
     }
@@ -254,7 +385,7 @@ export function createSyncEngine({
       "SELECT sync_event_id, updated_at FROM records WHERE store = ? AND id = ?"
     ).get(store, id);
     const { event, payload } = enqueueEvent("upsert", store, id, value, current);
-    database.exec("BEGIN IMMEDIATE");
+    if (!batchDepth) database.exec("BEGIN IMMEDIATE");
     try {
       database.prepare(`
         INSERT INTO records (store, id, data, updated_at, deleted, sync_event_id, sync_device)
@@ -269,12 +400,14 @@ export function createSyncEngine({
       database.prepare(
         "INSERT OR IGNORE INTO sync_applied (event_id, applied_at) VALUES (?, ?)"
       ).run(event.eventId, event.updatedAt);
-      database.exec("COMMIT");
+      if (!batchDepth) database.exec("COMMIT");
     } catch (error) {
-      database.exec("ROLLBACK");
+      if (!batchDepth) database.exec("ROLLBACK");
       throw error;
     }
-    if (enabled()) flushOutbox();
+    if (store === "foods" && !batchDepth) reconcileFoodLibrary();
+    if (["exercises","weights","profile","walkingProfiles"].includes(store) && !batchDepth) reconcileExerciseLibrary();
+    if (!batchDepth && enabled()) flushOutbox();
   }
 
   function localDelete(store, id) {
@@ -284,7 +417,7 @@ export function createSyncEngine({
     ).get(store, String(id));
     if (!current) return;
     const { event, payload } = enqueueEvent("delete", store, id, null, current);
-    database.exec("BEGIN IMMEDIATE");
+    if (!batchDepth) database.exec("BEGIN IMMEDIATE");
     try {
       database.prepare(`
         UPDATE records SET updated_at = ?, deleted = 1, sync_event_id = ?, sync_device = ?
@@ -296,12 +429,13 @@ export function createSyncEngine({
       database.prepare(
         "INSERT OR IGNORE INTO sync_applied (event_id, applied_at) VALUES (?, ?)"
       ).run(event.eventId, event.updatedAt);
-      database.exec("COMMIT");
+      if (!batchDepth) database.exec("COMMIT");
     } catch (error) {
-      database.exec("ROLLBACK");
+      if (!batchDepth) database.exec("ROLLBACK");
       throw error;
     }
-    if (enabled()) flushOutbox();
+    if (["weights","profile"].includes(store) && !batchDepth) reconcileExerciseLibrary();
+    if (!batchDepth && enabled()) flushOutbox();
   }
 
   function flushOutbox() {
@@ -330,6 +464,11 @@ export function createSyncEngine({
       "SELECT store, id, data, deleted, sync_event_id, updated_at FROM records"
     ).all();
     for (const row of rows) {
+      if(String(row.sync_event_id||'').startsWith('preset-')&&!row.deleted){
+        const event={schemaVersion:1,eventId:row.sync_event_id,deviceId:getSetting("sync_device_id"),createdAt:row.updated_at,updatedAt:row.updated_at,operation:"upsert",store:row.store,recordId:row.id,baseEventId:"",data:JSON.parse(row.data)};
+        database.prepare("INSERT INTO sync_outbox(event_id,payload,written_at) VALUES(?,?,NULL) ON CONFLICT(event_id) DO UPDATE SET written_at=NULL").run(event.eventId,JSON.stringify(event));
+        continue;
+      }
       const current = { sync_event_id: row.sync_event_id, updated_at: row.updated_at };
       const { event, payload } = enqueueEvent(
         row.deleted ? "delete" : "upsert",
@@ -646,6 +785,8 @@ export function createSyncEngine({
     if (!candidates.length) throw new Error("备份中没有可识别的记录");
     let imported = 0;
     let skipped = 0;
+    const priority = store => store === "walkingProfiles" ? 0 : ["exerciseLibrary", "foodLibrary"].includes(store) ? 1 : 2;
+    candidates.sort((a, b) => priority(a.store) - priority(b.store));
     for (const candidate of candidates) {
       const current = database.prepare(
         "SELECT updated_at FROM records WHERE store = ? AND id = ?"
@@ -768,6 +909,8 @@ export function createSyncEngine({
       let newestSnapshotItem = latestSnapshot();
       const importedSnapshots = importLatestSnapshot(newestSnapshotItem);
       const importedEvents = importEvents();
+      reconcileFoodLibrary();
+      reconcileExerciseLibrary();
       const backup = createBackup(forceBackup);
       const freshness = ensureFreshCloudSnapshot(newestSnapshotItem);
       newestSnapshotItem = freshness.item;
@@ -792,6 +935,8 @@ export function createSyncEngine({
     flushOutbox();
     importLatestSnapshot();
     importEvents();
+    reconcileFoodLibrary();
+    reconcileExerciseLibrary();
     const target = writeFullSnapshot();
     const latest = latestSnapshot();
     cleanupCloudFiles(latest);
@@ -807,6 +952,8 @@ export function createSyncEngine({
     if (!enabled()) throw new Error("请先开启云盘同步");
     const importedSnapshots = importLatestSnapshot();
     const importedEvents = importEvents();
+    reconcileFoodLibrary();
+    reconcileExerciseLibrary();
     flushOutbox();
     setSetting("sync_last_full_import_at", now());
     setSetting("sync_last_imported", String(importedSnapshots + importedEvents));
@@ -907,6 +1054,10 @@ export function createSyncEngine({
 
   return {
     initialize,
+    batchLocalChanges,
+    reconcileFoodLibrary,
+    reconcileExerciseLibrary,
+    seedStarterCatalog,
     localUpsert,
     localDelete,
     configure,

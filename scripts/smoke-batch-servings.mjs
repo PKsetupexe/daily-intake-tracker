@@ -1,0 +1,38 @@
+import {app,BrowserWindow} from 'electron';import {createServer} from 'node:http';import {mkdirSync,writeFileSync} from 'node:fs';import path from 'node:path';
+async function main(){
+const root=path.resolve(import.meta.dirname,'..'),out=path.join(root,'installer/smoke-profile-v3.3.0');mkdirSync(out,{recursive:true});const profile=path.join(out,'run-'+Date.now());mkdirSync(profile);app.setPath('userData',profile);app.setAppPath(root);BrowserWindow.prototype.show=function(){};
+let actions=[],lastRequest,lastHeaders;const results=[],pause=ms=>new Promise(r=>setTimeout(r,ms));
+const server=createServer(async(req,res)=>{let text='';for await(const c of req)text+=c;lastRequest=JSON.parse(text);lastHeaders=req.headers;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({reply:'已记录',actions})}}]}));});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+setTimeout(()=>app.exit(1),60000).unref();await import('../electron/main.mjs');
+try{let w;for(let i=0;i<100;i++){w=BrowserWindow.getAllWindows()[0];if(w?.webContents.getURL().includes('?api=')&&!w.webContents.isLoading())break;await pause(200);}w.webContents.setBackgroundThrottling(false);await pause(3000);
+const run=code=>w.webContents.executeJavaScript(code);
+const call=(route,body)=>run("fetch(new URLSearchParams(location.search).get('api')+"+JSON.stringify(route)+",{method:'"+(body?'POST':'GET')+"',headers:{'Content-Type':'application/json'},"+(body?'body:'+JSON.stringify(JSON.stringify(body)):'')+"}).then(async r=>({ok:r.ok,data:await r.json()}))");
+const check=(v,label)=>{if(!v)throw Error(label);results.push(label)};const put=(store,value)=>call('/api/put',{store,value});const chat=()=>call('/api/llm/chat',{message:'测试多记录',selectedDate:'2026-09-11'});
+await put('profile',{id:'me',sex:'male',height:175});await put('weights',{id:'2026-09-11',date:'2026-09-11',weight:70});await call('/api/llm/config',{baseUrl:'http://127.0.0.1:'+server.address().port,model:'test',apiKey:'isolated-test',systemPrompt:'自定义提示',enableSearch:false,headerPreset:'opencode',customHeaders:'{"X-Test-Client":"nutrition-test"}',proxyMode:'direct'});
+actions=[{store:'foods',value:[{id:'same',name:'测试番茄炒蛋',weight:250,calories:300,protein:15,carbs:12,fat:22},{id:'same',name:'测试米饭',weight:200,calories:260,protein:5,carbs:56,fat:1}]}];
+let r=await chat();const firstSession=lastHeaders['x-opencode-session'];check(Boolean(firstSession)&&lastHeaders['x-test-client']==='nutrition-test','configured session and custom headers reach provider');check(r.ok&&r.data.actions.length===2,'two foods saved from one grouped response');check(r.data.actions[0].value.id!==r.data.actions[1].value.id,'new records have independent ids');
+let d=(await call('/api/data')).data;check(d.foodLibrary.find(x=>x.name==='测试米饭').defaultServingGrams===200,'LLM updates default portion');
+check(JSON.stringify(lastRequest).includes('产生3条exercises'),'custom prompt receives multi-record rules');
+actions=[{store:'exercises',value:{name:'步行',steps:'10,000步',calories:100,duration:100}},{store:'exercises',value:{name:'中等强度健身房力量训练',duration:'1小时',calories:250}},{store:'exercises',value:{name:'网球',duration:'半小时',calories:150}}];
+r=await chat();check(r.ok&&r.data.actions.length===3,'three exercises saved in one batch');check(r.data.actions[0].value.calories===245&&r.data.actions[1].value.duration===60&&r.data.actions[2].value.duration===30,'walking rate and hour/minute conversion');
+d=(await call('/api/data')).data;const snapshot=JSON.stringify(d);
+actions=[{store:'foods',value:{name:'不应保存的食物',weight:100,calories:90}},{store:'exercises',value:{name:'无效运动',duration:'未知',calories:100}}];r=await chat();check(!r.ok&&r.data.error.includes('没有写入任何记录'),'invalid batch gives actionable error');check(JSON.stringify((await call('/api/data')).data)===snapshot,'invalid batch rolls back records and libraries');
+let rice=d.foodLibrary.find(x=>x.name==='测试米饭');await put('foodLibrary',{...rice,defaultServingGrams:180});
+d=(await call('/api/data')).data;check(d.foodLibrary.find(x=>x.id===rice.id).defaultServingGrams===180,'manual default survives refresh');
+await put('foods',{id:'manual-food',name:'测试米饭',date:'2026-09-11',time:'19:00',weight:230,calories:299,protein:5,carbs:60,fat:1});
+check((await call('/api/data')).data.foodLibrary.find(x=>x.id===rice.id).defaultServingGrams===230,'new manual intake updates portion');
+w.reload();await pause(3000);
+await run("Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='选择已记录过的食物').click()");await pause(200);
+const input=async(selector,value)=>{await run("(()=>{const e=document.querySelector("+JSON.stringify(selector)+");Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,"+JSON.stringify(value)+");e.dispatchEvent(new Event('input',{bubbles:true}));})()");await pause(120)};
+await input('.library-picker input','测试米饭');await run("document.querySelector('.directory-select').click()");await pause(150);check(await run("document.querySelector('.library-picker input[type=number]').value==='230'"),'picker prefills default grams');
+await run("document.querySelector('.modal-head button').click()");await run("Array.from(document.querySelectorAll('nav button')).find(b=>b.textContent.includes('历史')).click()");await pause(200);await input('.food-library-section .library-toolbar input','测试米饭');await run("document.querySelector('.food-library-section form.library-toolbar').requestSubmit()");await pause(200);await run("document.querySelector('.library-card button').click()");await pause(150);await input('.modal input[name=defaultServingGrams]','175');await run("document.querySelector('form.modal').requestSubmit()");await pause(200);check((await call('/api/data')).data.foodLibrary.find(x=>x.id===rice.id).defaultServingGrams===175,'history editor saves default grams');
+actions=[{operation:'update',store:'foods',value:{id:'manual-food',name:'模型修改米饭',weight:115,carbs:40,calories:200}}];r=await chat();check(r.ok,'LLM food edit succeeds');
+d=(await call('/api/data')).data;check(Math.abs(d.foodLibrary.find(x=>x.name==='模型修改米饭').carbs-40/115*100)<1e-8,'LLM edit updates normalized food library');
+check(lastHeaders['x-opencode-session']===firstSession,'session stable across conversation');await call('/api/chat/clear',{});actions=[];await chat();check(lastHeaders['x-opencode-session']!==firstSession,'clear conversation renews session');
+w.reload();await pause(3000);await run("Array.from(document.querySelectorAll('button')).find(x=>x.textContent==='模型设置').click()");await pause(200);
+check(await run("document.querySelector('select[name=proxyMode]').value==='direct'&&document.querySelector('select[name=headerPreset]').value==='opencode'&&document.querySelector('textarea[name=customHeaders]').value.includes('nutrition-test')"),'settings UI loads persisted network and headers');
+await run("(()=>{const e=document.querySelector('select[name=proxyMode]');Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(e,'auto');e.dispatchEvent(new Event('change',{bubbles:true}));})()");await pause(100);
+await run("document.querySelector('form.llm-modal').requestSubmit()");await pause(250);check((await call('/api/llm/config')).data.proxyMode==='auto','settings UI saves network mode');
+writeFileSync(path.join(out,'result.json'),JSON.stringify({passed:true,results},null,2));server.close();app.exit(0);
+}catch(e){writeFileSync(path.join(out,'result.json'),JSON.stringify({error:e.stack,results},null,2));server.close();app.exit(1)}
+}main();

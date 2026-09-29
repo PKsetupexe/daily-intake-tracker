@@ -1,0 +1,7 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {initial,directoryGroups} from '../app/contact-order.mjs';
+const items=Array.from({length:10},(_,i)=>({id:String(i),name:['苹果','白米饭','鸡蛋','番茄','牛肉','西瓜','生菜','8分配跑步','@特色','Apple'][i]}));
+const records=items.slice(0,7).map((x,i)=>({...x,date:'2026-09-'+String(i+1).padStart(2,'0'),time:'12:00'}));
+test('Chinese, Latin, digits and symbols group correctly',()=>{assert.deepEqual(items.map(x=>initial(x.name)),['P','B','J','F','N','X','S','0–9','#','A']);});
+test('manual and automatic pin limits for all six combinations',()=>{for(let n=0;n<=5;n++){const r=directoryGroups(items,records,items.slice(0,n).map(x=>x.id),'alphabet','',x=>x.id);assert.equal(r.manual.length,n);assert.equal(r.auto.length,Math.min(3,5-n));assert.equal(new Set([...r.manual,...r.auto]).size,n+r.auto.length);}});
+test('actual latest usage wins and presets remain alphabetical below recent records',()=>{const r=directoryGroups(items,[...records,{id:'0',date:'2026-09-20',time:'08:00'}],[],'recent','',x=>x.id);assert.deepEqual(r.auto,['0','6','5']);assert.equal(r.groups[1].label,'最近记录');assert.deepEqual(r.groups.slice(2).map(x=>x.label),['0–9','A','#']);});
+test('search filters existing pins without promoting other results',()=>{const r=directoryGroups(items,records,[],'recent','苹果',x=>x.id);assert.deepEqual(r.auto,['6','5','4']);assert.equal(r.groups[0].label,'最近记录');assert.equal(r.groups[0].items[0].name,'苹果');});

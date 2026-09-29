@@ -1,0 +1,14 @@
+import {DatabaseSync} from 'node:sqlite';import {readFileSync,writeFileSync} from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';import {createSyncEngine} from '../electron/sync-engine.mjs';import {planDefaultServings} from '../electron/default-servings.mjs';
+const root=readFileSync('work/default-servings-path.txt','utf8').trim(),apply=process.argv.includes('--apply');
+const db=new DatabaseSync(apply?path.join(process.env.APPDATA,'daily-intake-desktop/data/food_manage.sqlite'):path.join(root,'trial.sqlite'));db.exec('PRAGMA busy_timeout=10000');
+const stores=['exerciseLibrary','walkingProfiles','foodLibrary','foods','exercises','profile','weights','baselineMultipliers','targetScenarios','targetScenarioDefaults','energyTargetDays','energyTargetDefaults'];
+const getSetting=(k,f='')=>k==='sync_enabled'?'false':db.prepare('SELECT value FROM settings WHERE key=?').get(k)?.value??f;
+const setSetting=(k,v)=>db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k,String(v));
+const engine=createSyncEngine({database:db,getSetting,setSetting,stores});engine.initialize({reconcile:false});engine.exportBackupFile(path.join(root,apply?'before-live.json':'before-trial.json'));
+const before=db.prepare("SELECT store,id,data FROM records WHERE deleted=0 AND store IN ('foods','foodLibrary','exercises')").all();
+const plan=planDefaultServings(db);
+engine.batchLocalChanges(()=>engine.reconcileFoodLibrary());
+for(const row of before){const next=JSON.parse(db.prepare('SELECT data FROM records WHERE store=? AND id=?').get(row.store,row.id).data);const old=JSON.parse(row.data);for(const key of Object.keys(old).filter(k=>!['updatedAt','defaultServingGrams','servingSource','servingBasis','servingRecordId','servingUpdatedAt'].includes(k)))assert.deepEqual(next[key],old[key],row.id+':'+key)}
+const count=db.prepare('SELECT COUNT(*) n FROM sync_outbox').get().n;engine.reconcileFoodLibrary();assert.equal(db.prepare('SELECT COUNT(*) n FROM sync_outbox').get().n,count);
+const summary={live:apply,updated:plan.length,fromHistory:plan.filter(x=>x.servingSource==='history').length,fromReference:plan.filter(x=>x.servingSource==='reference').length,estimated:plan.filter(x=>x.servingSource==='estimated').length,historyAndNutrientsUnchanged:true,repeatEmitsNoEvents:true,portions:plan.map(x=>({name:x.name,grams:x.defaultServingGrams,source:x.servingSource}))};
+writeFileSync(path.join(root,apply?'live-result.json':'trial-result.json'),JSON.stringify(summary,null,2));console.log(JSON.stringify({...summary,portions:summary.portions.slice(0,6)},null,2));db.close();
