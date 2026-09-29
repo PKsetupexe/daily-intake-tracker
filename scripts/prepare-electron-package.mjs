@@ -9,7 +9,7 @@ const dist = path.join(root, "dist");
 const packagedDist = path.join(packageDir, "dist");
 
 if (!existsSync(path.join(dist, "standalone", "server.js"))) {
-  throw new Error("请先运行 pnpm build，生成 dist/standalone/server.js");
+  throw new Error("请先运行 npm run build，生成 dist/standalone/server.js");
 }
 
 for (const name of readdirSync(source).filter((name) => name.endsWith(".mjs"))) {
