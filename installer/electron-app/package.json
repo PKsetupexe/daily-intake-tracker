@@ -1,6 +1,6 @@
 {
   "name": "daily-intake-desktop",
-  "version": "3.6.0",
+  "version": "3.7.6",
   "private": true,
   "type": "module",
   "main": "main.mjs",
@@ -28,7 +28,7 @@
       }
     ],
     "directories": {
-      "output": "../electron-output-v3.6.0"
+      "output": "../electron-output-v3.7.6"
     },
     "win": {
       "target": [
@@ -43,7 +43,9 @@
       "artifactName": "DailyIntake-Setup-${version}.${ext}"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "app-icon.png",
       "artifactName": "DailyIntake-${version}-${arch}.${ext}"
     },

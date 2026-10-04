@@ -1,0 +1,1 @@
+export function dailyNutritionPreference(raw,date){let value;try{value=typeof raw==='string'?JSON.parse(raw):raw;}catch{}return {date,enabled:value?.date===date&&typeof value.enabled==='boolean'?value.enabled:true};}

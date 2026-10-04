@@ -5,6 +5,8 @@ import { normalizeFoodRecord } from "./food-name.mjs";
 import { libraryId, scaleNutrients, sortLibraryFoods } from "./food-library.mjs";
 import { ActivityEditModal,ActivityPanel,ActivityModal,WalkingPanel,WalkingModal,ActivityEntry,WalkingProfile } from "./activity-library";
 import { ContactDirectory } from "./contact-directory";
+import { useDailyNutritionView } from "./use-daily-nutrition-view";
+import { RecentNutrients } from "./nutrient-recent-view";
 import { createPortal } from "react-dom";
 import { selectBodyTrendDates } from "./body-trend-dates.mjs";
 import { energyTargetForDate, longTermEnergyTargetForDate, normalizeEnergyAdjustment, projectedMonthlyWeightChange } from "./energy-balance-targets.mjs";
@@ -306,6 +308,7 @@ export default function Home() {
   const [energyTargetDays, setEnergyTargetDays] = useState<EnergyTargetDayRecord[]>([]);
   const [energyTargetDefaults, setEnergyTargetDefaults] = useState<EnergyTargetDefaultRecord[]>([]);
   const [date, setDate] = useState(today());
+  const {enabled:recentNutritionView,ready:recentNutritionReady,toggle:toggleRecentNutrition}=useDailyNutritionView(apiRequest,message=>setStatus(message));
   const [tab, setTab] = useState<"today" | "body" | "history">("today");
   const [modal, setModal] = useState<"walking" | "libraryPick" | "food" | "exercise" | "weight" | "deleteWeight" | "baseline" | "deleteBaseline" | "profile" | "llm" | "appearance" | null>(null);
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
@@ -1017,8 +1020,8 @@ export default function Home() {
             </div>
 
             <aside className="nutrition">
-              <div className="section-title"><div><p>营养素总览</p><h2>不只看热量</h2></div></div>
-              <article className="nutrition-panel">
+              <div className="section-title"><div><p>营养素总览</p><h2>不只看热量</h2></div><button className="recent-view-toggle" type="button" role="switch" aria-label="近期视图" aria-checked={recentNutritionView} disabled={!recentNutritionReady} onClick={toggleRecentNutrition}>近期视图<i aria-hidden="true"/></button></div>
+              {recentNutritionView?<article className="nutrition-panel recent-nutrition"><RecentNutrients foods={foods} date={date} totals={totals} recommendations={recommendations} labels={nutrientLabels.slice(4)}/></article>:<article className="nutrition-panel">
                 <div className="nutrition-columns"><span>营养素</span><span>摄入 / 每日参考</span></div>
                 {nutrientLabels.slice(4).map(([key, label, unit]) => {
                   const target = recommendations[key];
@@ -1031,7 +1034,7 @@ export default function Home() {
                     </div>
                   </div>;
                 })}
-              </article>
+              </article>}
               <p className="data-note">总糖仅包含单糖和双糖，不包含淀粉或膳食纤维；蔗糖和添加糖分别单列。添加糖建议上限为 25 g/天。旧记录未提供细分糖时会显示为 0，不代表一定不含。</p>
             </aside>
           </section>
@@ -1329,7 +1332,7 @@ function FoodModal({ onClose, onSubmit, date, record }: { onClose: () => void; o
     <h3>热量、宏量营养与糖</h3>
     <div className="nutrient-inputs">{nutrientLabels.slice(0, 8).map(([key, label, unit]) => <label key={key}>{label}（{unit}）<input name={key} type="number" min="0" step="any" readOnly={linked} value={values[key]} onChange={e=>setValues({...values,[key]:e.target.value})} /></label>)}</div>
     <details><summary>填写维生素与矿物质（可选）</summary><div className="nutrient-inputs">{nutrientLabels.slice(8).map(([key, label, unit]) => <label key={key}>{label}（{unit}）<input name={key} type="number" min="0" step="any" readOnly={linked} value={values[key]} onChange={e=>setValues({...values,[key]:e.target.value})} /></label>)}</div></details>
-    <label className="wide note-label">备注<input name="note" placeholder="份量、克重说明、做法或数据来源（名称只写食品名）" defaultValue={record?.note || ""} /></label>
+    <label className="wide note-label">备注{record?<textarea className="record-edit-note" name="note" rows={1} defaultValue={record.note||""} placeholder="份量、克重说明、做法或数据来源（名称只写食品名）"/>:<input name="note" placeholder="份量、克重说明、做法或数据来源（名称只写食品名）" defaultValue="" />}</label>
     {error&&<p role="alert">{error}</p>}<div className="modal-actions"><button type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary" disabled={busy}>{record ? "保存修改" : "保存饮食"}</button></div>
   </form></div>;
 }

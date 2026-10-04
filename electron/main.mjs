@@ -1,3 +1,4 @@
+import {dailyNutritionPreference} from "./nutrition-view-preference.mjs";
 import {validateConnection,completionUrl,modelHeaders,createModelTransport} from "./model-network.mjs";
 import {expandRecordActions,numericValue,durationMinutes,BATCH_RECORD_RULES} from './llm-batch.mjs';
 import {STARTER_CATALOG} from './starter-catalog.mjs';
@@ -154,6 +155,12 @@ function initializeDatabase() {
     onBeforeExerciseMigration: () => syncEngine.exportBackupFile(path.join(dataDir, "before-exercise-name-cleanup-v2.json")),
   });
   syncEngine.initialize();
+}
+
+function nutritionViewPreference(){
+  const value=dailyNutritionPreference(getSetting("nutrition_recent_view",""),todayIso());
+  setSetting("nutrition_recent_view",JSON.stringify(value));
+  return value;
 }
 
 function getSetting(key, fallback = "") {
@@ -539,6 +546,7 @@ function startApi() {
       if (!external && origin !== uiOrigin) return sendJson(response, 403, { error: "Origin not allowed" }, origin);
 
       if (request.method === "GET") {
+        if (route === "/api/nutrition/view") return sendJson(response,200,nutritionViewPreference(),origin);
         if (route === "/api/directory/preferences") return sendJson(response, 200, JSON.parse(getSetting("directoryPreferences", "{}")), origin);
         if (route === "/api/data") return sendJson(response, 200, allData(), origin);
         if (route === "/api/llm/config") return sendJson(response, 200, {
@@ -574,7 +582,13 @@ function startApi() {
 
       if (request.method !== "POST") return sendJson(response, 405, { error: "Method not allowed" }, origin);
       const body = await readBody(request);
-      if (route === "/api/directory/preferences") {
+      if (route === "/api/nutrition/view") {
+        if(typeof body.enabled!=="boolean")throw Error("近期视图设置无效");
+        const value={date:todayIso(),enabled:body.enabled};
+        setSetting("nutrition_recent_view",JSON.stringify(value));
+        return sendJson(response,200,value,origin);
+      }
+      else if (route === "/api/directory/preferences") {
         if (!/^(food-directory-v1|exercise-directory-v1-(male|female|unspecified))$/.test(body.key || "")) throw new Error("Invalid preference key");
         const preferences = JSON.parse(getSetting("directoryPreferences", "{}"));
         preferences[body.key] = { sort: body.sort === "recent" ? "recent" : "alphabet", pins: [...new Set((Array.isArray(body.pins) ? body.pins : []).filter(id => typeof id === "string" && id.length < 2000))].slice(0,5) };

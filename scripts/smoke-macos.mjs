@@ -39,6 +39,10 @@ try {
   const api = new URL(firstUrl).searchParams.get("api");
   const created = await first.webContents.executeJavaScript(`fetch(${JSON.stringify(api + "/api/put")},{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({store:"foods",value:{id:"mac-smoke-food",name:"Mac 测试食品",date:"2026-09-29",time:"12:00",weight:100,calories:100}})}).then(r=>r.ok)`);
   if (!created) throw new Error("无法写入本地记录");
+  const initialView = await first.webContents.executeJavaScript(`fetch(${JSON.stringify(api + "/api/nutrition/view")}).then(r=>r.json())`);
+  if (initialView.enabled !== true) throw new Error("近期视图首次打开未默认开启");
+  const changedView = await first.webContents.executeJavaScript(`fetch(${JSON.stringify(api + "/api/nutrition/view")},{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:false})}).then(r=>r.json())`);
+  if (changedView.enabled !== false || changedView.date !== initialView.date) throw new Error("无法保存近期视图当日偏好");
 
   first.close();
   await new Promise((resolve) => setTimeout(resolve, 250));
@@ -48,7 +52,9 @@ try {
   if (new URL(second.webContents.getURL()).searchParams.get("api") !== api) throw new Error("重新打开时重复启动了本地服务");
   const restored = await second.webContents.executeJavaScript(`fetch(${JSON.stringify(api + "/api/data")}).then(r=>r.json()).then(d=>d.foods.some(x=>x.id==="mac-smoke-food"))`);
   if (!restored) throw new Error("重新打开后记录未保留");
-  console.log("macOS 桌面启动、菜单、关闭后重新打开和本地记录检查通过");
+  const restoredView = await second.webContents.executeJavaScript(`fetch(${JSON.stringify(api + "/api/nutrition/view")}).then(r=>r.json())`);
+  if (restoredView.enabled !== false || restoredView.date !== initialView.date) throw new Error("重新打开后近期视图偏好未保留");
+  console.log("macOS 桌面启动、菜单、关闭后重新打开、本地记录和近期视图偏好检查通过");
   app.exit(0);
 } catch (error) {
   console.error(error);

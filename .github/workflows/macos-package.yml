@@ -33,7 +33,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: daily-intake-macos-${{ matrix.arch }}
-          path: installer/electron-output-v3.6.0/*.dmg
+          path: installer/electron-output-v*/*.dmg
           if-no-files-found: error
       # GUI lifecycle is verified in an interactive Mac login session; the hosted
       # runner did not emit Electron's ready event during the smoke attempt.
